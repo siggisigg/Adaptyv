@@ -44,7 +44,7 @@ docker compose exec postgres psql -U app -d app  # SQL shell (DBeaver: localhost
 docker compose exec api pytest -v              # API tests
 docker compose exec api pytest -v tests/test_plumbing.py::test_failed_request_keeps_none_of_its_writes   # one test
 docker compose logs -f api                     # API logs (uvicorn --reload restarts on code edits)
-docs/render-diagrams.sh                        # README mermaid blocks -> docs/diagrams/*.svg/png (Docker image minlag/mermaid-cli)
+docs/render-diagrams.sh                        # README + docs/slide-diagrams.md mermaid blocks -> docs/diagrams/*.svg/png (Docker image minlag/mermaid-cli)
 ```
 
 `./initdb` is mounted into `/docker-entrypoint-initdb.d`, but Postgres only runs it when the `postgres_data` volume is **empty**. After any SQL change, do a full rebuild (`down -v`). This deletes all data in the DB.
@@ -65,7 +65,7 @@ This is a thin FastAPI layer (see `API_PLAN.md`). Business rules stay in SQL. Th
 - The user currently comes from an `X-User-Id` header. That's **dev-only**, until login (build step 5).
 - Tests (`tests/conftest.py`) run against the real `app` DB in a transaction that's always rolled back. Each request gets a savepoint. `make_client(app)` builds a client for any app, which `test_plumbing.py` uses for test-only routes.
 
-`README.md` is the reviewer-facing write-up, with Mermaid diagrams. It is the **single source** for `docs/diagrams/`: edit the Mermaid block in the README, then re-run `docs/render-diagrams.sh`. Never edit the generated files. Each block's first line, `%% file: <name>`, sets its output file name. Keep it in sync when the schema changes, especially the questions-answered, assumptions and cuts sections at the end.
+`README.md` is the reviewer-facing write-up, with Mermaid diagrams. It and `docs/slide-diagrams.md` (slide-only diagrams: the full ER diagram split into two halves) are the **single source** for `docs/diagrams/`. Edit the Mermaid block there, then re-run `docs/render-diagrams.sh`. If you change the full ER diagram, update the core ER diagram and both halves too. Never edit the generated files. Each block's first line, `%% file: <name>`, sets its output file name. Keep it in sync when the schema changes, especially the questions-answered, assumptions and cuts sections at the end.
 
 ## Schema layout (`initdb/`)
 

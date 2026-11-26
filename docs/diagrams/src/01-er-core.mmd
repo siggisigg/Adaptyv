@@ -1,0 +1,28 @@
+%% file: er-core
+erDiagram
+    storage_unit |o--o{ storage_unit : "stored_in (nesting)"
+    storage_unit ||--o{ vessel : "holds"
+    vessel ||--o{ items : "contains (one live item)"
+
+    storage_unit {
+        TEXT barcode PK
+        TEXT kind FK "room, freezer, rack, box, plate..."
+        TEXT stored_in FK "parent unit, NULL = top level"
+        INT n_rows "grid, for plates and boxes"
+        INT n_cols
+    }
+    vessel {
+        INT id PK
+        TEXT barcode "tubes only"
+        TEXT stored_in FK
+        TEXT position "well/slot, e.g. A1"
+        NUMERIC max_volume_ul "hard limit"
+    }
+    items {
+        INT id PK
+        INT in_vessel FK
+        INT material FK
+        NUMERIC quantity
+        TEXT unit FK
+        TIMESTAMPTZ expires_at
+    }

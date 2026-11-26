@@ -1,0 +1,56 @@
+%% file: er-location-quantity
+erDiagram
+    storage_unit_kinds ||--o{ storage_unit : "kind of"
+    storage_unit |o--o{ storage_unit : "stored_in (nesting)"
+    storage_unit ||--o{ vessel : "holds"
+    storage_unit ||--o{ stock : "holds"
+    stock |o--o{ storage_unit : "from_stock (plate made from stock)"
+    stock |o--o{ vessel : "from_stock"
+    vessel ||--o{ items : "contains (one live item)"
+    units ||--o{ items : "unit"
+    materials ||--o{ items : "category"
+
+    storage_unit_kinds {
+        TEXT code PK
+        BOOL has_grid "fixed slots"
+        INT max_children "count limit"
+    }
+    storage_unit {
+        TEXT barcode PK
+        TEXT kind FK
+        TEXT stored_in FK "parent, NULL = top level"
+        INT n_rows
+        INT n_cols
+        BOOL discarded
+    }
+    stock {
+        INT id PK
+        TEXT description
+        INT quantity "count"
+        TEXT stored_in FK
+    }
+    vessel {
+        INT id PK
+        TEXT barcode "tubes only"
+        TEXT stored_in FK
+        TEXT position "e.g. A1"
+        NUMERIC max_volume_ul "hard limit"
+        BOOL discarded
+    }
+    items {
+        INT id PK
+        INT in_vessel FK
+        INT material FK
+        NUMERIC quantity
+        TEXT unit FK
+        TIMESTAMPTZ expires_at
+    }
+    units {
+        TEXT code PK
+        TEXT dimension "volume, mass, count"
+        NUMERIC to_base "to uL, ug, pcs"
+    }
+    materials {
+        INT id PK
+        TEXT name
+    }

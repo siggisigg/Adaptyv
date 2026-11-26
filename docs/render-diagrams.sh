@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Render every ```mermaid block in README.md to docs/diagrams/*.svg and *.png.
+# Render every ```mermaid block in README.md and docs/slide-diagrams.md to docs/diagrams/*.svg and *.png.
 #
-# README.md is the single source of truth: this script extracts the diagrams from it, so the
-# images can't drift from the README. Re-run it after editing a diagram.
+# Those two files are the single source of truth: this script extracts the diagrams from them,
+# so the images can't drift from the docs. Re-run it after editing a diagram.
 #
 # Needs Docker (uses the official Mermaid CLI image, which bundles a headless Chromium).
 # Usage (from anywhere):  docs/render-diagrams.sh
@@ -22,7 +22,10 @@ python3 - "$OUT/src" <<'PY'
 import re, sys, pathlib
 out = pathlib.Path(sys.argv[1])
 section, n = "intro", 0
-lines = pathlib.Path("README.md").read_text().splitlines()
+# Sources, in order: the README first, then the slide-only diagrams.
+lines = []
+for source in ("README.md", "docs/slide-diagrams.md"):
+    lines += pathlib.Path(source).read_text().splitlines()
 i = 0
 while i < len(lines):
     line = lines[i]

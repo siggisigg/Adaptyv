@@ -30,8 +30,43 @@ Any SQL client (for example DBeaver) can connect at `localhost:5432`, database `
 
 ## 1. The model at a glance
 
+The core is three tables: **where** (`storage_unit`, nested), **in what** (`vessel`), and **what and how much** (`items`). Everything else hangs off these.
+
 ```mermaid
-%% file: er-diagram
+%% file: er-core
+erDiagram
+    storage_unit |o--o{ storage_unit : "stored_in (nesting)"
+    storage_unit ||--o{ vessel : "holds"
+    vessel ||--o{ items : "contains (one live item)"
+
+    storage_unit {
+        TEXT barcode PK
+        TEXT kind FK "room, freezer, rack, box, plate..."
+        TEXT stored_in FK "parent unit, NULL = top level"
+        INT n_rows "grid, for plates and boxes"
+        INT n_cols
+    }
+    vessel {
+        INT id PK
+        TEXT barcode "tubes only"
+        TEXT stored_in FK
+        TEXT position "well/slot, e.g. A1"
+        NUMERIC max_volume_ul "hard limit"
+    }
+    items {
+        INT id PK
+        INT in_vessel FK
+        INT material FK
+        NUMERIC quantity
+        TEXT unit FK
+        TIMESTAMPTZ expires_at
+    }
+```
+
+The full model:
+
+```mermaid
+%% file: er-full
 erDiagram
     storage_unit_kinds ||--o{ storage_unit : "kind of"
     storage_unit |o--o{ storage_unit : "stored_in (nesting)"
