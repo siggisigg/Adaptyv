@@ -157,3 +157,9 @@ AS $$
     ORDER BY id DESC
     LIMIT 1;
 $$;
+
+-- Filed batches and their lines (added with the transfer-batch feature).
+CREATE TRIGGER audit_log_change AFTER INSERT OR UPDATE OR DELETE ON inventory.transfer_batches
+    FOR EACH ROW EXECUTE FUNCTION audit.log_change('id');
+CREATE TRIGGER audit_log_change AFTER INSERT OR UPDATE OR DELETE ON inventory.transfer_batch_lines
+    FOR EACH ROW EXECUTE FUNCTION audit.log_change('batch_id,line_no');

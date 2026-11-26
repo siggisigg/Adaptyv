@@ -167,7 +167,20 @@ flowchart TD
 
 ## 4. Consumption: `transfer()`
 
-All material movement goes through one function. It takes an amount out of a parent item and puts it either into a **new item in a vessel** (aliquots, dilution copies, robot well-to-well transfers) or into an **existing item** (adding a component to a buffer or mixture). A mixture is just an item with several parents. There is no separate table for it.
+All material movement goes through one function. It takes an amount out of a parent item and puts it either into a **vessel** (aliquots, dilution copies, robot well-to-well transfers) or into an **existing item** (adding a component to a buffer being made).
+
+**One liquid per vessel.** Once two liquids are in the same well, they physically *are* one liquid. So a vessel holds at most one item with quantity > 0, enforced by a partial unique index (`UNIQUE (in_vessel) WHERE quantity > 0`). Transferring into a vessel that already has content empties the existing item into a **new mixture item**, which records both inputs as parents:
+
+```mermaid
+flowchart LR
+    B["item 5: buffer 50 µL<br/>(now 0, kept as history)"] -- 50 µL --> M["item 9: buffer + sample 70 µL<br/>in DST A1"]
+    S["item 1: sample, SRC A1"] -- 20 µL --> M
+```
+
+- **A mixture is just an item with several parents.** There's no separate concoctions table: tracing, status and quantity all work the same way.
+- **Its material** defaults to that of the material being added, and can be overridden with `p_material`.
+- **It expires** at the earliest expiry of its inputs.
+- **A new item, not a grown one.** The old item keeps a true record ("this was 50 µL of buffer"), and the lineage records exactly how much of each input went in.
 
 ```mermaid
 flowchart TD
@@ -243,6 +256,7 @@ flowchart LR
         r[reserved]
         u[in_use]
         t[in_transit]
+        pr[pending_review]
     end
     subgraph Calculated["Calculated: worked out when read, can't go stale"]
         direction TB
@@ -253,7 +267,7 @@ flowchart LR
         qfi[qc_failed inherited<br/>via lineage]
     end
     d & s & e & z & qf & qfi --> RED((RED<br/>not usable))
-    qpe & r & u & t & es --> YEL((YELLOW<br/>usable, needs attention<br/>or spoken for))
+    qpe & r & u & t & pr & es --> YEL((YELLOW<br/>usable, needs attention<br/>or spoken for))
     qp -.-> qpe
     RED ~~~ GRN((GREEN<br/>usable and free))
     YEL ~~~ GRN
@@ -271,7 +285,36 @@ flowchart LR
 
 ---
 
-## 7. Who changed what: the audit log
+## 7. Lab-sized actions: batches and failed runs
+
+A robot copying a 96-well plate is one action, but the database's unit of work is one well. `transfer_batch(lines)` runs many transfers as **one all-or-nothing action**. If a line fails, the run isn't lost: it's **filed for a person to decide on**.
+
+```mermaid
+flowchart TD
+    R["transfer_batch(96 lines)"] --> L["Try each line in its own savepoint<br/>(BEGIN ... EXCEPTION block)<br/>record OK or the database's reason"]
+    L --> Q{Any line failed?}
+    Q -- no --> OK["All applied: COMMIT<br/>audit groups it by transaction_id"]
+    Q -- yes --> U["Undo EVERY line<br/>(roll back to the batch savepoint)"]
+    U --> F["File the request in transfer_batches / transfer_batch_lines<br/>per line: would_succeed + error<br/>set pending_review (yellow) on items involved<br/>COMMIT the filing"]
+    F --> D{"A person decides, later,<br/>in a new transaction"}
+    D -- "fix lines, then apply" --> A["apply_transfer_batch()<br/>re-checks EVERY line against current inventory<br/>still all or nothing"]
+    D -- "apply successful lines only" --> A2["apply_transfer_batch(p_only_ok => TRUE)<br/>failed lines stay on record"]
+    D -- reject --> X["reject_transfer_batch()"]
+    A & A2 & X --> C["Clear pending_review<br/>(unless another pending batch touches the item)"]
+
+    style OK fill:#e3f6e3,stroke:#2e8b57
+    style U fill:#fbe3e3,stroke:#c0392b
+    style F fill:#fff6e0,stroke:#c79a2a
+```
+
+- **All or nothing:** the inventory never records a half-done plate.
+- **Every line is checked, not just the first failure.** Each line runs in its own savepoint, so the reviewer sees *all* the problems at once: "line 2: Item 4 has only 100 µL, cannot take 500 µL" and "line 3: Item 9999 does not exist".
+- **The filed lines store the raw request, with no foreign keys.** A line may have failed precisely because it pointed at something that doesn't exist (a wrong scan), and it must still be filed.
+- **Applying re-checks everything,** because "would have succeeded" goes stale: someone may have used the material since.
+- **No database write waits on a person.** The filing commits immediately, and the decision is a separate transaction.
+- **Accepted trade-off:** while a batch is pending, the database may not match the bench, because the robot may already have run. The yellow `pending_review` flag makes that visible to planning instead of hiding it.
+
+## 8. Who changed what: the audit log
 
 Every insert, update and delete on the data and reference tables is recorded in `audit.log` by one generic trigger. Each entry holds the **full old and new row** as JSONB, plus who made the change, why, and which action it belonged to.
 
@@ -307,7 +350,7 @@ SELECT audit.as_of('inventory.items', '3', '2026-11-25 14:00+00');          -- i
 SELECT * FROM audit.log WHERE transaction_id = 81234;                       -- everything one action did
 ```
 
-## 8. How the brief's questions are answered
+## 9. How the brief's questions are answered
 
 | # | Question | Answered by |
 |---|---|---|
@@ -317,16 +360,17 @@ SELECT * FROM audit.log WHERE transaction_id = 81234;                       -- e
 | 4 | Where did it come from and where did it go? | `lot_trace()`, `item_ancestors()`, `item_descendants()` |
 | 5 | Who changed what, and when? What did it say before? | `audit.log`, `audit.history()`, `audit.as_of()` |
 
-## 9. Assumptions
+## 10. Assumptions
 
 - **Experiment planning is a separate system.** It *sets* `reserved`, and the inventory only stores it.
 - **QC applies per supplier lot.** A lot is pending until one of `qc_passed`/`qc_failed` is set. Material made in-house has no lot, so it has no QC state.
 - **Aliquots inherit the parent's `expires_at`.**
 - **Capacity is only enforced for volume.** Mass and count items in a vessel don't count towards its fill.
+- **Wells are evenly mixed.** A mixture is treated as one uniform liquid. Settled material or beads would need a different model.
 - **Moving material between different dimensions is rejected.** `transfer()` won't add µg of DNA into a µL buffer, because concentration isn't modelled.
 - **Lab scale:** the tracing and status views recurse through lineage for each item. That's fine for thousands of items. At much larger scale you'd cache the results.
 
-## 10. What was cut, and why
+## 11. What was cut, and why
 
 Depth on consumption, lineage and usability was prioritised over breadth.
 

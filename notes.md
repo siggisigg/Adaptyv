@@ -35,6 +35,7 @@ Every state is an independent boolean, and the colour is **calculated** from the
 | `reserved` | yellow | recorded | item | Spoken for by experiment planning |
 | `in_use` | yellow | recorded | item | On the bench or in an instrument right now |
 | `in_transit` | yellow | recorded | item | Being moved |
+| `pending_review` | yellow | recorded | item | Touched by a failed batch that's waiting for a decision. Set by `transfer_batch()` and cleared on apply or reject. |
 | `expires_soon` | yellow | calculated | `expires_at` within 7 days | Use it first, or plan a reorder |
 
 - **Why some flags are calculated:** a stored "expired" flag would need a job to flip it at midnight, and a missed run means wrong data. In OOP terms, calculated flags are `@property`, not fields.

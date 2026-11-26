@@ -130,8 +130,15 @@ CREATE TABLE inventory.items (
     in_transit       BOOLEAN NOT NULL DEFAULT FALSE,   -- yellow: on the move between locations
     discarded        BOOLEAN NOT NULL DEFAULT FALSE,   -- red: thrown away
     shipped          BOOLEAN NOT NULL DEFAULT FALSE,   -- red: left the lab
+    pending_review   BOOLEAN NOT NULL DEFAULT FALSE,   -- yellow: touched by a failed batch awaiting a decision
     CHECK (NOT (discarded AND shipped))                -- an item leaves the inventory one way
 );
+
+-- One liquid per vessel: at most one item with quantity > 0 in any vessel.
+-- A partial unique index only covers rows matching its WHERE, so emptied items don't count.
+-- Mixing happens in transfer(): the existing content becomes a parent of a new mixture item.
+CREATE UNIQUE INDEX items_one_live_item_per_vessel
+    ON inventory.items (in_vessel) WHERE quantity > 0;
 
 -- Which items were made from which. One row per parent -> child edge:
 --   aliquot split: 1 parent, many children
@@ -147,4 +154,40 @@ CREATE TABLE inventory.item_lineage (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (parent_item, child_item),
     CHECK (parent_item <> child_item)
+);
+
+-- A batch of transfers (e.g. a whole plate) that FAILED and was filed for a person to decide on.
+-- Successful batches are never stored here: they are applied directly and visible in the audit log.
+-- Lifecycle uses the same pattern as lots.qc_passed / qc_failed: neither flag = pending.
+CREATE TABLE inventory.transfer_batches (
+    id               SERIAL PRIMARY KEY,
+    context          TEXT,                                  -- what the action was, from app.context
+    requested_by     INTEGER REFERENCES users(id),
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    applied          BOOLEAN NOT NULL DEFAULT FALSE,
+    rejected         BOOLEAN NOT NULL DEFAULT FALSE,
+    resolved_by      INTEGER REFERENCES users(id),
+    resolved_at      TIMESTAMPTZ,
+    resolution_note  TEXT,
+    CHECK (NOT (applied AND rejected)),
+    CHECK ((applied OR rejected) = (resolved_at IS NOT NULL))  -- resolved exactly when a decision was made
+);
+
+-- One row per requested transfer in a filed batch. Stores the RAW REQUEST exactly as sent:
+-- no foreign keys or either/or check, because a line may have failed precisely because it
+-- pointed at an item or vessel that doesn't exist (a wrong scan), and it must still be filed.
+-- Lines are re-checked by transfer() when the batch is applied; would_succeed / error record
+-- what happened on the first attempt, as information for the reviewer.
+CREATE TABLE inventory.transfer_batch_lines (
+    batch_id         INTEGER NOT NULL REFERENCES inventory.transfer_batches(id),
+    line_no          INTEGER NOT NULL,
+    parent_item      INTEGER,
+    amount           NUMERIC,
+    unit             TEXT,
+    to_vessel        INTEGER,
+    to_item          INTEGER,
+    would_succeed    BOOLEAN NOT NULL,      -- result of the first attempt (given the lines before it)
+    error            TEXT,                  -- the database's reason, for failed lines
+    PRIMARY KEY (batch_id, line_no),
+    CHECK (would_succeed = (error IS NULL))
 );

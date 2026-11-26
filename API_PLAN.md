@@ -117,9 +117,19 @@ Other plate-level actions follow the same pattern: one request, a loop or array 
 | POST | `/stock/{id}/plate` | Take one plate from stock: decrement the count, create the plate storage unit and its wells |
 | GET | `/plates/{barcode}` | A grid view: every well's items, fill and colour |
 
-**Two open design questions:**
-1. **All-or-nothing, or partial success?** If well B7 fails, should the other 95 be recorded? The plan says **all-or-nothing**: the inventory must not record a plate the robot never fully made. With dry runs, failures are caught before the robot starts. But if the robot *has already* physically run, refusing to record it makes the inventory wrong in a different way. A possible middle ground is to record what succeeded and flag the failed wells for review.
-2. **A well holding more than one item:** `transfer()` moves one item. If a source well holds several separate items, the plan is to **reject that well** for now. The alternative is to transfer each item proportionally.
+**Decided, and built in the database:**
+
+1. **All or nothing, and failed runs are filed for review.** The endpoint calls `inventory.transfer_batch(lines)`.
+   - On success it returns the child ids.
+   - On any failure, nothing is applied. The run is filed in `transfer_batches` with each line's would-succeed status and reason, and the items involved get the yellow `pending_review` flag. The API returns **202 Accepted** with the per-line report and the batch id, because the filing *was* committed.
+   - Review endpoints:
+     - `GET /batches?pending=true`
+     - `GET /batches/{id}`
+     - `PATCH /batches/{id}/lines/{n}` (fix a line)
+     - `POST /batches/{id}/apply` (`?only_ok=true` applies only the good lines)
+     - `POST /batches/{id}/reject`
+   - Dry run is still a plain rollback, and it doesn't file anything.
+2. **One liquid per vessel** (option C). A well always holds at most one live item, and adding into an occupied well creates a mixture item with both inputs as lineage parents. So a plate transfer is always one `transfer()` per well.
 
 ## Barcodes in URLs
 
@@ -133,7 +143,7 @@ Anything with a physical label is addressed by its **barcode**. Records with no 
 | Item, lot | `/items/{id}`, `/lots/{id}` | No physical label. Lots can also be found with `?supplier=&lot_number=`. |
 | Anything scanned | `GET /scan/{barcode}` | Works out whether the barcode belongs to a storage unit or a tube, and returns it with its location |
 
-**Known gap:** tube and storage-unit barcodes live in different tables, so the same barcode could exist in both. `/scan` would return 409 in that case, and the proper fix is a shared barcode registry (see README section 10).
+**Known gap:** tube and storage-unit barcodes live in different tables, so the same barcode could exist in both. `/scan` would return 409 in that case, and the proper fix is a shared barcode registry (see README section 11).
 
 ## Error mapping
 
@@ -236,4 +246,6 @@ The database side is built (`initdb/04-audit.sql`). These endpoints only read it
 - The schema is renamed from `_staging` to `inventory`.
 - Barcodes in URLs for anything with a physical label. `vessel.barcode` has been added.
 - Async is preferred (trade-offs above, open for discussion).
-- Lab-sized actions, such as whole plates, are single requests. The database stays per-well atomic, and the API combines the calls into one transaction.
+- Lab-sized actions, such as whole plates, are single requests. The database stays per-well atomic, and `transfer_batch()` combines the calls into one all-or-nothing action.
+- Failed batches are filed for review rather than lost, and resolved later by apply or reject.
+- One liquid per vessel: mixing creates a new mixture item.

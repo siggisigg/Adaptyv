@@ -74,35 +74,46 @@ FOR EACH ROW EXECUTE FUNCTION inventory.check_vessel_capacity();
 -------------------------------------------------------------------------------
 
 -- Take p_amount (in p_unit) out of item p_parent and put it either
---   * into a NEW item in vessel p_to_vessel   (aliquot, dilution copy, well-by-well transfer), or
---   * into an EXISTING item p_to_item         (adding a component to a mixture/buffer).
+--   * into vessel p_to_vessel                 (aliquot, dilution copy, well-by-well transfer), or
+--   * into an EXISTING item p_to_item         (adding a component to a buffer being made).
+--
+-- One liquid per vessel: a vessel holds at most one item with quantity > 0 (enforced by
+-- the partial unique index items_one_live_item_per_vessel). So transferring into a vessel:
+--   * that is empty    -> creates a new item (same material as the parent)
+--   * that has content -> empties the existing item into a NEW MIXTURE item, whose lineage
+--                         records both the existing content and the parent as its parents.
+--                         The mixture's material is p_material if given, else the parent's;
+--                         it expires at the earliest expiry of its inputs.
+--
 -- Decreasing the parent, creating/increasing the child and recording lineage happen together:
 -- if any step fails (not enough left, vessel full, wrong unit), none of them happen.
--- Returns the child item's id.
+-- Returns the id of the item that now holds the material.
 --
 -- Usage:
---   SELECT inventory.transfer(1, 100, 'uL', p_to_vessel => 7);   -- aliquot 100 uL into vessel 7
---   SELECT inventory.transfer(4, 2, 'mL',  p_to_item   => 12);   -- add 2 mL of item 4 into mixture 12
+--   SELECT inventory.transfer(1, 100, 'uL', p_to_vessel => 7);   -- 100 uL of item 1 into vessel 7
+--   SELECT inventory.transfer(4, 2, 'mL',  p_to_item   => 12);   -- add 2 mL of item 4 into item 12
 CREATE FUNCTION inventory.transfer(
     p_parent     INTEGER,
     p_amount     NUMERIC,
     p_unit       TEXT,
     p_to_vessel  INTEGER DEFAULT NULL,
     p_to_item    INTEGER DEFAULT NULL,
-    p_user       INTEGER DEFAULT NULL
+    p_user       INTEGER DEFAULT NULL,
+    p_material   INTEGER DEFAULT NULL   -- material for a new mixture; default: the parent's
 )
 RETURNS INTEGER
 LANGUAGE plpgsql
 AS $$
 DECLARE
     parent       inventory.items%ROWTYPE;
-    child        inventory.items%ROWTYPE;
+    child        inventory.items%ROWTYPE;   -- p_to_item, or the existing content of p_to_vessel
     amount_unit  units%ROWTYPE;
     parent_unit  units%ROWTYPE;
     child_unit   units%ROWTYPE;
     taken        NUMERIC;   -- p_amount converted into the parent's unit
     child_id     INTEGER;
     status       RECORD;    -- the parent's row from item_status
+    acting_user  INTEGER := COALESCE(p_user, NULLIF(current_setting('app.user_id', true), '')::INTEGER);
 BEGIN
     -- 1. Validate the request
     IF (p_to_vessel IS NULL) = (p_to_item IS NULL) THEN
@@ -154,13 +165,49 @@ BEGIN
 
     -- 5. Put it into the child (the capacity trigger checks the child's vessel here)
     IF p_to_vessel IS NOT NULL THEN
-        -- New item: same material, inherits the parent's expiry. lot_id stays NULL
-        -- because made items are traced to their lot through lineage.
-        INSERT INTO inventory.items
-            (description, material, manufacturer, in_vessel, quantity, unit, expires_at)
-        VALUES
-            (parent.description, parent.material, parent.manufacturer, p_to_vessel, p_amount, p_unit, parent.expires_at)
-        RETURNING id INTO child_id;
+        SELECT * INTO child FROM inventory.items
+        WHERE in_vessel = p_to_vessel AND quantity > 0
+        FOR UPDATE;
+
+        IF NOT FOUND THEN
+            -- 5a. Empty vessel: new item, same material, inherits the parent's expiry.
+            --     lot_id stays NULL because made items are traced to their lot through lineage.
+            INSERT INTO inventory.items
+                (description, material, manufacturer, in_vessel, quantity, unit, expires_at)
+            VALUES
+                (parent.description, COALESCE(p_material, parent.material), parent.manufacturer,
+                 p_to_vessel, p_amount, p_unit, parent.expires_at)
+            RETURNING id INTO child_id;
+        ELSE
+            -- 5b. Vessel has content: the two liquids become one mixture item.
+            IF child.id = p_parent THEN
+                RAISE EXCEPTION 'Item % is already in vessel %: source and target are the same', p_parent, p_to_vessel;
+            END IF;
+            SELECT * INTO child_unit FROM units WHERE code = child.unit;
+            IF child_unit.dimension <> amount_unit.dimension THEN
+                RAISE EXCEPTION 'Vessel % holds item % measured in % (%), cannot add an amount in % (%)',
+                    p_to_vessel, child.id, child.unit, child_unit.dimension, p_unit, amount_unit.dimension;
+            END IF;
+
+            -- Empty the existing item first, so the one-live-item index and the capacity
+            -- trigger see the vessel correctly when the mixture is inserted.
+            UPDATE inventory.items SET quantity = 0, updated_at = now() WHERE id = child.id;
+
+            INSERT INTO inventory.items
+                (description, material, in_vessel, quantity, unit, expires_at)
+            VALUES
+                (concat_ws(' + ', child.description, parent.description),
+                 COALESCE(p_material, parent.material),
+                 p_to_vessel,
+                 child.quantity + trim_scale(p_amount * amount_unit.to_base / child_unit.to_base),
+                 child.unit,
+                 LEAST(child.expires_at, parent.expires_at))   -- LEAST ignores NULLs
+            RETURNING id INTO child_id;
+
+            -- The existing content is the mixture's other parent.
+            INSERT INTO inventory.item_lineage (parent_item, child_item, quantity_used, unit, created_by)
+            VALUES (child.id, child_id, child.quantity, child.unit, acting_user);
+        END IF;
     ELSE
         SELECT * INTO child FROM inventory.items WHERE id = p_to_item FOR UPDATE;
         IF NOT FOUND THEN
@@ -180,8 +227,7 @@ BEGIN
     -- 6. Record lineage. Adding from the same parent into the same mixture twice
     --    accumulates onto the existing edge instead of failing on the primary key.
     INSERT INTO inventory.item_lineage (parent_item, child_item, quantity_used, unit, created_by)
-    VALUES (p_parent, child_id, taken, parent.unit,
-            COALESCE(p_user, NULLIF(current_setting('app.user_id', true), '')::INTEGER))  -- fall back to the API's request user
+    VALUES (p_parent, child_id, taken, parent.unit, acting_user)
     ON CONFLICT (parent_item, child_item)
     DO UPDATE SET quantity_used = inventory.item_lineage.quantity_used + EXCLUDED.quantity_used;
 
@@ -306,6 +352,7 @@ flags AS (
         i.reserved,
         i.in_transit,
         i.shipped,
+        i.pending_review,
         (i.discarded OR v.discarded OR su.discarded)                                  AS discarded,  -- item, its tube, or its plate
         -- calculated
         COALESCE(i.expires_at <= now(), FALSE)                                        AS expired,
@@ -333,6 +380,7 @@ reasons AS (
             CASE WHEN f.reserved     THEN 'reserved'     END,
             CASE WHEN f.in_use       THEN 'in_use'       END,
             CASE WHEN f.in_transit   THEN 'in_transit'   END,
+            CASE WHEN f.pending_review THEN 'pending_review' END,
             CASE WHEN f.expires_soon THEN 'expires_soon' END
         ], NULL) AS yellow_reasons
     FROM flags f
@@ -360,3 +408,214 @@ FROM inventory.item_status s
 JOIN materials m ON m.id = s.material
 JOIN units u     ON u.code = s.unit
 GROUP BY m.name, u.dimension, s.light;
+
+-------------------------------------------------------------------------------
+-- Batches: many transfers as one lab action (e.g. a whole plate)
+-------------------------------------------------------------------------------
+-- All or nothing. If every line succeeds, the batch is applied and nothing extra is stored
+-- (the audit log groups it by transaction_id). If ANY line fails:
+--   * every line is undone, so the inventory never records a half-done plate;
+--   * the request is filed in transfer_batches / transfer_batch_lines with, per line,
+--     whether it would have succeeded and why not;
+--   * the items involved get the yellow pending_review flag;
+--   * the call still COMMITS (the filing must be kept) and returns the per-line report.
+-- A person then resolves it later, in a separate transaction:
+--   apply_transfer_batch() (re-checks every line), or reject_transfer_batch().
+-- Accepted: while a batch is pending the database may not match the bench (the robot may
+-- have physically run). The pending_review flag makes that visible instead of hiding it.
+
+-- Items a batch touches: the parents, the target items, and items in the target vessels.
+-- p_live_only: only items with quantity > 0 (used when flagging; clearing looks at all).
+CREATE FUNCTION inventory.transfer_batch_items(p_batch INTEGER, p_live_only BOOLEAN)
+RETURNS SETOF INTEGER
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT l.parent_item FROM inventory.transfer_batch_lines l WHERE l.batch_id = p_batch
+    UNION
+    SELECT l.to_item     FROM inventory.transfer_batch_lines l WHERE l.batch_id = p_batch
+    UNION
+    SELECT i.id
+    FROM inventory.transfer_batch_lines l
+    JOIN inventory.items i ON i.in_vessel = l.to_vessel
+    WHERE l.batch_id = p_batch AND (NOT p_live_only OR i.quantity > 0);
+$$;
+
+-- p_lines: JSON array of {"parent": int, "amount": num, "unit": text, "to_vessel": int} or {..., "to_item": int}
+-- Usage:
+--   SELECT * FROM inventory.transfer_batch('[{"parent": 4, "amount": 20, "unit": "uL", "to_vessel": 101},
+--                                            {"parent": 5, "amount": 20, "unit": "uL", "to_vessel": 102}]');
+CREATE FUNCTION inventory.transfer_batch(p_lines JSONB)
+RETURNS TABLE (line_no INTEGER, ok BOOLEAN, child_item INTEGER, error TEXT, filed_batch INTEGER)
+LANGUAGE plpgsql
+AS $$
+#variable_conflict use_column
+DECLARE
+    line        RECORD;
+    oks         BOOLEAN[] := '{}';
+    children    INTEGER[] := '{}';
+    errors      TEXT[]    := '{}';
+    any_failed  BOOLEAN   := FALSE;
+    new_child   INTEGER;
+    new_batch   INTEGER;
+BEGIN
+    IF jsonb_typeof(p_lines) IS DISTINCT FROM 'array' OR jsonb_array_length(p_lines) = 0 THEN
+        RAISE EXCEPTION 'p_lines must be a non-empty JSON array';
+    END IF;
+
+    -- Outer block = a savepoint around the whole batch.
+    BEGIN
+        FOR line IN
+            SELECT t.ord, t.e
+            FROM jsonb_array_elements(p_lines) WITH ORDINALITY AS t(e, ord)
+            ORDER BY t.ord
+        LOOP
+            -- Inner block = a savepoint per line: a failure undoes only this line,
+            -- is recorded, and the loop carries on so every line gets checked.
+            BEGIN
+                new_child := inventory.transfer(
+                    (line.e ->> 'parent')::INTEGER,
+                    (line.e ->> 'amount')::NUMERIC,
+                    line.e ->> 'unit',
+                    p_to_vessel => (line.e ->> 'to_vessel')::INTEGER,
+                    p_to_item   => (line.e ->> 'to_item')::INTEGER);
+                oks      := array_append(oks, TRUE);
+                children := array_append(children, new_child);
+                errors   := array_append(errors, NULL::TEXT);
+            EXCEPTION WHEN OTHERS THEN
+                oks        := array_append(oks, FALSE);
+                children   := array_append(children, NULL::INTEGER);
+                errors     := array_append(errors, SQLERRM);
+                any_failed := TRUE;
+            END;
+        END LOOP;
+
+        IF any_failed THEN
+            -- Undo every line that did succeed. Raising inside the outer block rolls the
+            -- database back to its savepoint; local variables (oks, errors) keep their values.
+            RAISE EXCEPTION USING ERRCODE = 'IB001', MESSAGE = 'batch has failed lines';
+        END IF;
+    EXCEPTION WHEN SQLSTATE 'IB001' THEN
+        NULL;
+    END;
+
+    IF NOT any_failed THEN
+        RETURN QUERY
+        SELECT i, TRUE, children[i], NULL::TEXT, NULL::INTEGER
+        FROM generate_subscripts(oks, 1) AS i;
+        RETURN;
+    END IF;
+
+    -- File the batch for review.
+    INSERT INTO inventory.transfer_batches (context, requested_by)
+    VALUES (NULLIF(current_setting('app.context', true), ''),
+            NULLIF(current_setting('app.user_id', true), '')::INTEGER)
+    RETURNING id INTO new_batch;
+
+    INSERT INTO inventory.transfer_batch_lines
+        (batch_id, line_no, parent_item, amount, unit, to_vessel, to_item, would_succeed, error)
+    SELECT new_batch, t.ord,
+           (t.e ->> 'parent')::INTEGER, (t.e ->> 'amount')::NUMERIC, t.e ->> 'unit',
+           (t.e ->> 'to_vessel')::INTEGER, (t.e ->> 'to_item')::INTEGER,
+           oks[t.ord], errors[t.ord]
+    FROM jsonb_array_elements(p_lines) WITH ORDINALITY AS t(e, ord);
+
+    UPDATE inventory.items it
+    SET pending_review = TRUE
+    WHERE it.id IN (SELECT inventory.transfer_batch_items(new_batch, TRUE));
+
+    RETURN QUERY
+    SELECT i, oks[i], NULL::INTEGER, errors[i], new_batch
+    FROM generate_subscripts(oks, 1) AS i;
+END;
+$$;
+
+-- Clear pending_review on a resolved batch's items, unless another pending batch still touches them.
+CREATE FUNCTION inventory.clear_pending_review(p_batch INTEGER)
+RETURNS VOID
+LANGUAGE sql
+AS $$
+    UPDATE inventory.items it
+    SET pending_review = FALSE
+    WHERE it.pending_review
+      AND it.id IN (SELECT inventory.transfer_batch_items(p_batch, FALSE))
+      AND NOT EXISTS (
+          SELECT 1 FROM inventory.transfer_batches b
+          WHERE b.id <> p_batch AND NOT b.applied AND NOT b.rejected
+            AND it.id IN (SELECT inventory.transfer_batch_items(b.id, FALSE)));
+$$;
+
+-- Apply a filed batch. Every line goes through transfer() again against the inventory as it
+-- is NOW (the stored "would succeed" may be stale). Still all or nothing: if a line fails,
+-- nothing is applied and the batch stays pending. The reviewer can first fix lines with a
+-- plain UPDATE on transfer_batch_lines (audited), or pass p_only_ok => TRUE to apply only the
+-- lines that originally succeeded; the failed lines stay on record for a physical check.
+-- Usage: SELECT * FROM inventory.apply_transfer_batch(3, p_note => 'B7 volume corrected');
+CREATE FUNCTION inventory.apply_transfer_batch(
+    p_batch    INTEGER,
+    p_only_ok  BOOLEAN DEFAULT FALSE,
+    p_note     TEXT    DEFAULT NULL
+)
+RETURNS TABLE (line_no INTEGER, child_item INTEGER)
+LANGUAGE plpgsql
+AS $$
+#variable_conflict use_column
+DECLARE
+    batch  inventory.transfer_batches%ROWTYPE;
+    l      inventory.transfer_batch_lines%ROWTYPE;
+BEGIN
+    SELECT * INTO batch FROM inventory.transfer_batches WHERE id = p_batch FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Batch % does not exist', p_batch;
+    END IF;
+    IF batch.applied OR batch.rejected THEN
+        RAISE EXCEPTION 'Batch % is already resolved', p_batch;
+    END IF;
+
+    FOR l IN
+        SELECT * FROM inventory.transfer_batch_lines bl
+        WHERE bl.batch_id = p_batch AND (NOT p_only_ok OR bl.would_succeed)
+        ORDER BY bl.line_no
+    LOOP
+        BEGIN
+            child_item := inventory.transfer(l.parent_item, l.amount, l.unit,
+                                             p_to_vessel => l.to_vessel, p_to_item => l.to_item);
+        EXCEPTION WHEN OTHERS THEN
+            -- Re-raise with the line number; the error aborts the whole apply.
+            RAISE EXCEPTION 'Batch %, line %: %', p_batch, l.line_no, SQLERRM;
+        END;
+        line_no := l.line_no;
+        RETURN NEXT;
+    END LOOP;
+
+    UPDATE inventory.transfer_batches
+    SET applied = TRUE,
+        resolved_by = NULLIF(current_setting('app.user_id', true), '')::INTEGER,
+        resolved_at = now(),
+        resolution_note = concat_ws(' | ', p_note, CASE WHEN p_only_ok THEN 'applied successful lines only' END)
+    WHERE id = p_batch;
+
+    PERFORM inventory.clear_pending_review(p_batch);
+END;
+$$;
+
+-- Reject a filed batch: nothing is applied; the flags are cleared.
+-- Usage: SELECT inventory.reject_transfer_batch(3, 'robot run aborted, plate discarded');
+CREATE FUNCTION inventory.reject_transfer_batch(p_batch INTEGER, p_note TEXT DEFAULT NULL)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE inventory.transfer_batches
+    SET rejected = TRUE,
+        resolved_by = NULLIF(current_setting('app.user_id', true), '')::INTEGER,
+        resolved_at = now(),
+        resolution_note = p_note
+    WHERE id = p_batch AND NOT applied AND NOT rejected;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Batch % does not exist or is already resolved', p_batch;
+    END IF;
+
+    PERFORM inventory.clear_pending_review(p_batch);
+END;
+$$;
