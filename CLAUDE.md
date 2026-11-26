@@ -63,6 +63,7 @@ Postgres runs these files in alphabetical order, so the number prefix sets the d
 - `01-schema.sql`: tables and constraints only.
 - `02-reference-data.sql`: lookup rows (`materials`, `units`, `storage_unit_kinds`). A new category, unit or kind is a new row here.
 - `03-functions.sql`: views, functions and triggers.
+- `04-audit.sql`: the `audit` schema, `audit.log`, the generic `log_change()` trigger on every data and reference table (not `users`), append-only protection, and `history()`/`as_of()`.
 
 `notes.md` records known edge cases and accepted gaps.
 
@@ -74,6 +75,8 @@ These design decisions are settled:
 - **Quantities:** `items.quantity` + `unit` → `units` (each unit has a dimension and a factor to the base unit). A vessel's fill level is **calculated** in the `vessel_fill` view, never stored. `max_volume_ul` is a hard limit enforced by a trigger on `items`.
 - **Consumption:** all material movement goes through `inventory.transfer()`, which in one atomic step decreases the parent, creates or increases the child and records `item_lineage`. Don't write `item_lineage` or change quantities by hand.
 - **Lineage:** mixtures and concoctions are ordinary `items` with several parents in `item_lineage`. There is no separate concoctions table. Lineage is a graph, so the trace functions (`item_descendants`, `item_ancestors`, `lot_trace`) return each item once, at its shortest depth.
+- **Audit:** every change is logged with the old and new row as JSONB. The user and reason come from the transaction-local settings `app.user_id`/`app.context` (`set_config(..., true)`). `transaction_id` groups one action. A new data table needs its own `audit_log_change` trigger, with its primary key column(s) as the argument.
+- **Barcodes:** storage units and tubes (`vessel.barcode`, optional) have barcodes. Wells are addressed as plate barcode + position.
 - **Lots:** bought items set `lot_id` → `lots`, which has `UNIQUE (supplier, supplier_lot_number)`. Made items are traced back to lots through `item_lineage`.
 - **Traffic light:** usability is a set of independent booleans. Recorded flags are stored (`items.in_use/reserved/in_transit/discarded/shipped`, `vessel.discarded`, `storage_unit.discarded`, `lots.qc_passed/qc_failed`). Flags that follow from other data (expired, expires_soon, empty, QC via lineage) are calculated in the `item_status` view, never stored. The colour is the most severe active flag. To add a state, add a boolean, then add one line to `red_reasons`/`yellow_reasons`. `transfer()` refuses red parents. See the table in `notes.md`.
 - **Consumables:** countable consumables live in `stock`. Using one decreases its count, and any plate or tube made from it records `from_stock`.
@@ -82,5 +85,4 @@ These are still open:
 
 - Expiry that depends on storage conditions, and an expires-soon window per material type.
 - A material-definition layer, between category and lot.
-- An audit log (who changed what, and the previous value).
 - Enforcing storage-kind capacity.
