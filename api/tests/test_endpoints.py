@@ -1,6 +1,8 @@
-"""End-to-end tests through the HTTP API. Each test builds a small lab via the API itself:
+"""End-to-end tests through the HTTP API. Each test builds a small lab via the API itself,
+with its own material ('Test target'), so it doesn't depend on whatever else is in the database
+(e.g. the demo data):
 
-    ROOM-1 > FRZ-1 > TUBE-1 (1 mL target, lot T-778)
+    ROOM-1 > FRZ-1 > TUBE-1 (1 mL test target, lot T-778)
                    > SRC (plate)  wells A1, A2, A3: 100 uL target each (via POST /transfers)
                    > DST (plate)  no wells yet
 """
@@ -16,17 +18,19 @@ async def post(client, url, body=None, status=None, **kw):
 
 
 @pytest.fixture
-async def lab(client):
+async def lab(client, conn):
+    cur = await conn.execute("INSERT INTO materials (name) VALUES ('Test target') RETURNING id")
+    material = (await cur.fetchone())["id"]
     await post(client, "/storage-units", {"barcode": "ROOM-1", "kind": "room"}, 201)
     await post(client, "/storage-units", {"barcode": "FRZ-1", "kind": "freezer", "stored_in": "ROOM-1"}, 201)
     for plate in ("SRC", "DST"):
         await post(client, "/storage-units",
                    {"barcode": plate, "kind": "plate", "stored_in": "FRZ-1", "n_rows": 8, "n_cols": 12}, 201)
 
-    lot = await post(client, "/lots", {"material": 3, "supplier": "AcroBio", "supplier_lot_number": "T-778"}, 201)
+    lot = await post(client, "/lots", {"material": material, "supplier": "TestSupplier", "supplier_lot_number": "T-778"}, 201)
     tube = await post(client, "/vessels", {"name": "target tube", "barcode": "TUBE-1", "stored_in": "FRZ-1",
                                            "max_volume_ul": 1500}, 201)
-    target = await post(client, "/items", {"material": 3, "vessel_id": tube["id"], "quantity": 1, "unit": "mL",
+    target = await post(client, "/items", {"material": material, "vessel_id": tube["id"], "quantity": 1, "unit": "mL",
                                            "lot_id": lot["id"]}, 201)
 
     wells = {}
@@ -103,7 +107,7 @@ async def test_failed_plate_transfer_applies_nothing_and_files_the_batch(client,
     assert a1["item"]["yellow_reasons"] == ["qc_pending", "pending_review"]
 
     pending = (await client.get("/batches", params={"pending": True})).json()
-    assert [b["id"] for b in pending] == [body["filed_batch"]]
+    assert body["filed_batch"] in [b["id"] for b in pending]
 
 
 async def test_fix_a_line_then_apply(client, lab, failed_plate_run):
@@ -155,7 +159,7 @@ async def test_scan(client, lab):
 
 async def test_material_quantities(client, lab):
     rows = (await client.get("/reports/material-quantities")).json()
-    targets = [r for r in rows if r["material"] == "Target proteins"]
+    targets = [r for r in rows if r["material"] == "Test target"]
     assert sum(float(r["total_base_unit"]) for r in targets) == 1000         # nothing lost: 700 + 3 x 100
 
 

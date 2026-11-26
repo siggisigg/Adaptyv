@@ -66,6 +66,7 @@ This is a thin FastAPI layer (see `API_PLAN.md`). Business rules stay in SQL. Th
 - Dry runs use `conn.transaction(force_rollback=True)`, a savepoint that is always undone. A failed batch returns **202** because the filing is committed.
 - Request bodies refer to vessels and items by id. URLs use barcodes for anything with a label (plates, tubes; wells as `/plates/{barcode}/wells/{position}`). `GET /scan/{barcode}` resolves a barcode to a record.
 - The user currently comes from an `X-User-Id` header. That's **dev-only**, until login (build step 5).
+- Tests must **not assume an empty database**, because the demo data is present. The `lab` fixture creates its own material ('Test target') and barcodes that don't clash with the demo.
 - Tests (`tests/conftest.py`) run against the real `app` DB in a transaction that's always rolled back. Each request gets a savepoint. `make_client(app)` builds a client for any app, which `test_plumbing.py` uses for test-only routes.
 
 `README.md` is the reviewer-facing write-up, with Mermaid diagrams. It and `docs/slide-diagrams.md` (slide-only diagrams: the full ER diagram split into two halves) are the **single source** for `docs/diagrams/`. Edit the Mermaid block there, then re-run `docs/render-diagrams.sh`. If you change the full ER diagram, update the core ER diagram and both halves too. Never edit the generated files. Each block's first line, `%% file: <name>`, sets its output file name. Keep it in sync when the schema changes, especially the questions-answered, assumptions and cuts sections at the end.
@@ -78,6 +79,7 @@ Postgres runs these files in alphabetical order, so the number prefix sets the d
 - `02-reference-data.sql`: lookup rows (`materials`, `units`, `storage_unit_kinds`). A new category, unit or kind is a new row here.
 - `03-functions.sql`: views, functions and triggers.
 - `04-audit.sql`: the `audit` schema, `audit.log`, the generic `log_change()` trigger on every data and reference table (not `users`), append-only protection, and `history()`/`as_of()`.
+- `05-demo-data.sql`: the demo lab (alice, bob, robot-1), built through the real functions with `pg_temp` helpers and one transaction per action. It deliberately produces every traffic-light state, a failed QC lot (HER2, lot 2) and a pending failed batch (batch 1). The README's "Demo data" table depends on these ids and barcodes.
 
 `notes.md` records known edge cases and accepted gaps.
 

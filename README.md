@@ -2,7 +2,7 @@
 
 This is a PostgreSQL data model for tracking lab material. It records what the lab has, how much of it is usable, where it is, what it was made from, and what was made from it.
 
-The main design rule is that **the database enforces correctness itself**. Quantities, capacity and usability are either enforced by constraints and triggers, or calculated from facts when they're read. They're never kept up to date by hand, so they can't drift. Other systems, such as experiment planning or a future API, can rely on the numbers.
+The main design rule is that **the database enforces correctness itself**. Quantities, capacity and usability are either enforced by constraints and triggers, or calculated from facts when they're read. They're never kept up to date by hand, so they can't drift. Other systems, such as experiment planning, can rely on the numbers. A thin FastAPI layer (section 9) sits on top. It calls the database's functions and doesn't repeat any of their rules.
 
 ```text
 initdb/
@@ -10,9 +10,11 @@ initdb/
   02-reference-data.sql   lookup rows: material categories, units, storage kinds
   03-functions.sql        views, functions and triggers (the behaviour)
   04-audit.sql            audit log: who changed what, when, and what it said before
+  05-demo-data.sql        a small demo lab (delete this file for an empty database)
+api/                      FastAPI layer: endpoints, error mapping, 23 tests
+docs/diagrams/            the diagrams below as SVG/PNG (docs/render-diagrams.sh)
 notes.md                  design notes, traffic-light reference, known gaps
-api/                      FastAPI layer (skeleton: pool, transactions, error mapping, tests)
-API_PLAN.md               plan for the FastAPI layer
+API_PLAN.md               API design notes and decisions
 ```
 
 ## Running it
@@ -25,6 +27,24 @@ docker compose down -v           # wipe the database; the next `up` reloads the 
 ```
 
 Any SQL client (for example DBeaver) can connect at `localhost:5432`, database `app`, user `app`, password `app`.
+
+## Demo data
+
+On first start the database is filled with a small lab (`initdb/05-demo-data.sql`). Everything in it was created **through the same database functions the API uses**, as separate actions by `alice`, `bob` and `robot-1`. So the lineage, mixtures, audit trail and a failed robot run are genuine, and every traffic-light state appears.
+
+Here's what to look at:
+
+| Try | What it shows |
+|---|---|
+| `curl localhost:8000/lots/2/trace` | The HER2 lot failed re-QC **after** it was used: 7 items across a tube box and a plate are red, and no item was updated. |
+| `curl 'localhost:8000/batches?pending=true'` then `curl localhost:8000/batches/1` | A robot run that failed on one well (A5 only had 30 µL). Nothing was applied, the run is filed with each well's result, and the 12 source wells show `pending_review`. |
+| `curl -X POST 'localhost:8000/batches/1/apply?only_ok=true'` | Resolve it: apply the 11 wells that would have worked. A5 stays on record. |
+| `curl localhost:8000/plates/PL-0002` | A BLI plate where every well is a sample + PD-L1 **mixture** with two lineage parents, marked `in_use` on the reader. |
+| `curl localhost:8000/scan/TB-0001` | A scanned tube: its full location, 380 µL left, yellow because it's `reserved`. |
+| `curl localhost:8000/reports/material-quantities` | How much there is, and how much is usable, per material and colour. |
+| `curl localhost:8000/audit/inventory.lots/2` | Who failed the HER2 lot, when, why, and its values before and after. |
+
+Or browse it all interactively at http://localhost:8000/docs.
 
 ---
 
@@ -415,7 +435,7 @@ flowchart LR
 | `old_row` / `new_row` | **What it said before**, and after. |
 
 - **One trigger for every table.** The primary key is passed to the trigger as an argument, because the tables use different keys (`id`, `barcode`, `code`, or `parent_item,child_item` for lineage).
-- **Append-only.** Updating, deleting or truncating `audit.log` is rejected. The trigger function is `SECURITY DEFINER`, so the API's database role can *cause* audit rows to be written without being able to write, edit or delete them itself.
+- **Append-only.** Updating, deleting or truncating `audit.log` is rejected. The trigger function is `SECURITY DEFINER`, so a restricted application role could *cause* audit rows to be written without being able to write, edit or delete them itself. That role isn't set up yet (see section 12).
 - **`users` is not audited by this trigger,** because its rows contain `password_hash`, which shouldn't be copied into a widely readable log.
 - **`transfer()` fills in `item_lineage.created_by`** from the same `app.user_id` setting, so the API doesn't have to pass the user separately.
 
@@ -425,32 +445,52 @@ SELECT audit.as_of('inventory.items', '3', '2026-11-25 14:00+00');          -- i
 SELECT * FROM audit.log WHERE transaction_id = 81234;                       -- everything one action did
 ```
 
-## 9. How the brief's questions are answered
+## 9. The API
 
-| # | Question | Answered by |
+`api/` is a thin FastAPI layer (async, psycopg 3, plain SQL, no ORM). It **doesn't re-implement any rule**. It checks the *shape* of each request, calls the database, and turns database errors into HTTP responses.
+
+- **One request = one transaction.** At the start of each request, the API tells the database who is acting and why (`set_config('app.user_id' / 'app.context', …, true)`), so the audit log records it. If anything fails, the whole request is undone.
+- **Only the `transfers` endpoints move material, and only by calling the database functions:**
+
+| Endpoint | Triggers | Answers with |
 |---|---|---|
-| 1 | How much do we have, and how much is usable? | `v_material_quantities` view; `v_item_status.light` per item |
-| 2 | Is it still viable? What expires soon? | `v_item_status` flags `expired` and `expires_soon` |
-| 3 | Where is it? | `items.in_vessel` → `vessel.stored_in` → `storage_unit.stored_in` chain; `location_path()` (walking up) and `storage_unit_contents()` (walking down) |
-| 4 | Where did it come from and where did it go? | `lot_trace()`, `item_ancestors()`, `item_descendants()` |
-| 5 | Who changed what, and when? What did it say before? | `audit.log`, `audit.history()`, `audit.as_of()` |
+| `POST /transfers` | `inventory.transfer()` | 201, or **422 with the database's reason** ("Item 4 has only 30 uL, cannot take 50 uL") |
+| `POST /transfers/batch` | `inventory.transfer_batch()` | 200 applied, or **202** filed for review |
+| `POST /plates/{barcode}/transfer` | `inventory.transfer_batch()`, one `transfer()` per well | the same, plus `dry_run` (check everything, then roll back) |
+| `POST /batches/{id}/apply` / `reject` | `apply_transfer_batch()` / `reject_transfer_batch()` | 200, or 422 naming the failing line |
 
-## 10. Assumptions
+- **Barcodes in URLs** for anything with a physical label: `/storage-units/{barcode}`, `/vessels/{barcode}`, and `/plates/{barcode}/wells/A1` for wells. `GET /scan/{barcode}` works out what a scanned code is.
+- **Database errors are mapped by error code (SQLSTATE):** a rule failure gives 422, a duplicate gives 409, and anything unexpected gives 500 without leaking the database's message.
+- **Tests:** 23 tests run the real database through HTTP, each inside a transaction that's always rolled back (`docker compose exec api pytest -v`).
+
+## 10. How the brief's questions are answered
+
+| # | Question | Database | API |
+|---|---|---|---|
+| 1 | How much do we have, and how much is usable? | `v_material_quantities`; `v_item_status.light` per item | `GET /reports/material-quantities`, `GET /items?light=green` |
+| 2 | Is it still viable? What expires soon? | `v_item_status` flags `expired` and `expires_soon` | `GET /reports/expiring?days=7` |
+| 3 | Where is it? | `location_path()` (walking up), `storage_unit_contents()` (walking down) | `GET /scan/{barcode}`, `GET /storage-units/{barcode}` |
+| 4 | Where did it come from and where did it go? | `lot_trace()`, `item_ancestors()`, `item_descendants()` | `GET /lots/{id}/trace`, `GET /items/{id}/ancestors` |
+| 5 | Who changed what, and when? What did it say before? | `audit.log`, `audit.history()`, `audit.as_of()` | `GET /audit/{table}/{key}?as_of=…` |
+
+## 11. Assumptions
 
 - **Experiment planning is a separate system.** It *sets* `reserved`, and the inventory only stores it.
 - **QC applies per supplier lot.** A lot is pending until one of `qc_passed`/`qc_failed` is set. Material made in-house has no lot, so it has no QC state.
-- **Aliquots inherit the parent's `expires_at`.**
+- **Aliquots inherit the parent's `expires_at`.** A mixture expires at the earliest expiry of its inputs, and takes the material of what was added unless told otherwise.
 - **Capacity is only enforced for volume.** Mass and count items in a vessel don't count towards its fill.
 - **Wells are evenly mixed.** A mixture is treated as one uniform liquid. Settled material or beads would need a different model.
 - **Moving material between different dimensions is rejected.** `transfer()` won't add µg of DNA into a µL buffer, because concentration isn't modelled.
 - **Lab scale:** the tracing and status views recurse through lineage for each item. That's fine for thousands of items. At much larger scale you'd cache the results.
 
-## 11. What was cut, and why
+## 12. What was cut, and why
 
 Depth on consumption, lineage and usability was prioritised over breadth.
 
 | Cut | Why, and what it would take |
 |---|---|
+| **Login and a restricted database role** | The API connects as the database owner, and the acting user comes from a development-only `X-User-Id` header. The plan is token login against `users`, plus a role that can only `EXECUTE` the functions and `SELECT` the views. That would make "material only moves through `transfer()`" and "the audit log is append-only" enforced by the database, not just conventions. |
+| **Making material across dimensions** | `transfer()` only moves amounts of the same dimension (µL → µL). Expressing samples (µL) from DNA (µg) therefore isn't recorded as lineage yet. In the demo data, samples are received into their wells directly. It needs a `make()` function that records parents with the amounts consumed, without unit conversion. |
 | **One barcode namespace** | Tubes (`vessel.barcode`) and storage units have barcodes in separate tables. Nothing stops the same barcode being used in both, which would make a scan ambiguous. It needs a shared barcode registry table, or a check across both tables. |
 | **Audit retention and storage** | Full-row JSONB on every change grows quickly with robot runs. It would need table partitioning by month, plus an archiving policy. |
 | **Expiry that depends on storage conditions** | The brief says lifetime depends on storage and timing. It needs a storage temperature per kind, plus shelf-life rules per material and condition. Today `expires_at` is set directly. |
