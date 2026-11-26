@@ -1,0 +1,25 @@
+services:
+  postgres:
+   image: postgres:16
+   restart: unless-stopped
+   environment:
+    POSTGRES_DB: app
+    POSTGRES_USER: app
+    POSTGRES_PASSWORD: app
+   volumes:
+    - postgres_data:/var/lib/postgresql/data
+   ports:
+    - "5432:5432"
+  python:
+    image: python:3.12-slim
+    restart: unless-stopped
+    working_dir: /app
+    command: ["sh", "-c", "sleep infinity"]
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql://app:app@postgres:5432/app
+
+volumes:
+  postgres_data:
+  
