@@ -1,25 +1,38 @@
 services:
   postgres:
-   image: postgres:16
-   restart: unless-stopped
-   environment:
-    POSTGRES_DB: app
-    POSTGRES_USER: app
-    POSTGRES_PASSWORD: app
-   volumes:
-    - postgres_data:/var/lib/postgresql/data
-   ports:
-    - "5432:5432"
-  python:
-    image: python:3.12-slim
+    image: postgres:16
     restart: unless-stopped
-    working_dir: /app
-    command: ["sh", "-c", "sleep infinity"]
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Postgres runs every *.sql file in this folder, in alphabetical order, but ONLY when the
+      # data volume is empty (first start). To re-run them after a schema change:
+      #   docker compose down -v && docker compose up -d
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"   # also how DBeaver connects: localhost:5432, db/user/password app/app/app
+    healthcheck:
+      # The API waits for this, so it doesn't start before the database accepts connections.
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build: ./api
+    restart: unless-stopped
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql://app:app@postgres:5432/app
+    volumes:
+      - ./api:/app    # live code: uvicorn --reload picks up edits without a rebuild
+    ports:
+      - "8000:8000"   # http://localhost:8000/docs
 
 volumes:
   postgres_data:
-  

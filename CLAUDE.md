@@ -38,23 +38,33 @@ The design-focus bullets in the brief are: material-type differences, storage lo
 ## Environment
 
 ```sh
-docker compose up -d                                          # postgres:16 (app/app/app on :5432) + idle python:3.12-slim
-docker compose exec postgres psql -U app -d app               # SQL shell
-docker compose exec -T postgres psql -U app -d app -v ON_ERROR_STOP=1 < initdb/01-schema.sql   # apply schema manually
-docker compose down -v                                        # wipe the DB volume
+docker compose up -d --build                   # postgres:16 (:5432) + FastAPI (:8000, docs at /docs)
+docker compose down -v && docker compose up -d # full rebuild: wipes the DB volume so initdb/*.sql re-runs
+docker compose exec postgres psql -U app -d app  # SQL shell (DBeaver: localhost:5432, app/app/app)
+docker compose exec api pytest -v              # API tests
+docker compose exec api pytest -v tests/test_plumbing.py::test_failed_request_keeps_none_of_its_writes   # one test
+docker compose logs -f api                     # API logs (uvicorn --reload restarts on code edits)
 ```
 
-To check that the schema runs without changing the DB, wrap it in a transaction that gets rolled back:
+`./initdb` is mounted into `/docker-entrypoint-initdb.d`, but Postgres only runs it when the `postgres_data` volume is **empty**. After any SQL change, do a full rebuild (`down -v`). This deletes all data in the DB.
+
+To check that SQL changes load before you rebuild, run them in a rolled-back transaction:
 
 ```sh
 { echo 'BEGIN;'; cat initdb/*.sql; echo 'ROLLBACK;'; } | docker compose exec -T postgres psql -U app -d app -v ON_ERROR_STOP=1
 ```
 
-`./initdb` is **not** mounted into `/docker-entrypoint-initdb.d`, so the schema is not applied automatically. Even if it were mounted, init scripts only run when the `postgres_data` volume is empty.
+That fails against an already-initialised DB, because the objects already exist. Use a throwaway database instead (`CREATE DATABASE inv_test`, load the files, test, `DROP DATABASE inv_test`). To test across committed transactions (audit, batches), always use a throwaway database.
 
-The `python` service will run the FastAPI layer described in `API_PLAN.md`. That's a thin API: business rules stay in SQL, and the API calls the functions and views and maps Postgres errors to HTTP. It hasn't been built yet.
+## API (`api/`)
 
-`README.md` is the reviewer-facing write-up, with Mermaid diagrams. Keep it in sync when the schema changes, especially sections 7–9 (questions answered, assumptions, cuts).
+This is a thin FastAPI layer (see `API_PLAN.md`). Business rules stay in SQL. The API calls the functions and views, and maps Postgres errors to HTTP in `app/errors.py` (by SQLSTATE: `P0001`→422, `23505`→409, unknown→500 without the DB message).
+
+- `app/db.py`: `AsyncConnectionPool` (psycopg 3, `dict_row`). Endpoints take `conn: Conn`, and `get_conn()` gives each request **one transaction**. It commits on return and rolls back on raise. `start_request()` sets `app.user_id`/`app.context` with `set_config(..., true)` for the audit log. Use `set_context(conn, "...")` for a readable audit context.
+- The user currently comes from an `X-User-Id` header. That's **dev-only**, until login (build step 5).
+- Tests (`tests/conftest.py`) run against the real `app` DB in a transaction that's always rolled back. Each request gets a savepoint. `make_client(app)` builds a client for any app, which `test_plumbing.py` uses for test-only routes.
+
+`README.md` is the reviewer-facing write-up, with Mermaid diagrams. Keep it in sync when the schema changes, especially the questions-answered, assumptions and cuts sections at the end.
 
 ## Schema layout (`initdb/`)
 

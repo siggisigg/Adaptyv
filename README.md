@@ -11,20 +11,20 @@ initdb/
   03-functions.sql        views, functions and triggers (the behaviour)
   04-audit.sql            audit log: who changed what, when, and what it said before
 notes.md                  design notes, traffic-light reference, known gaps
-API_PLAN.md               draft plan for the FastAPI layer
+api/                      FastAPI layer (skeleton: pool, transactions, error mapping, tests)
+API_PLAN.md               plan for the FastAPI layer
 ```
 
 ## Running it
 
 ```sh
-docker compose up -d
-# apply the schema (initdb/ is not mounted into the container, so this is a manual step)
-cat initdb/*.sql | docker compose exec -T postgres psql -U app -d app -v ON_ERROR_STOP=1
+docker compose up -d --build     # Postgres loads initdb/*.sql on first start; API at http://localhost:8000/docs
 docker compose exec postgres psql -U app -d app     # SQL shell
+docker compose exec api pytest -v                   # API tests
+docker compose down -v           # wipe the database; the next `up` reloads the schema from scratch
 ```
 
-To try it without keeping anything, wrap it in a transaction that gets rolled back:
-`{ echo 'BEGIN;'; cat initdb/*.sql; echo 'ROLLBACK;'; } | docker compose exec -T postgres psql -U app -d app`
+Any SQL client (for example DBeaver) can connect at `localhost:5432`, database `app`, user `app`, password `app`.
 
 ---
 
