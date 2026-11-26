@@ -1,4 +1,8 @@
 -- 03-functions.sql: views, functions and triggers built on the tables in 01-schema.sql.
+--
+-- Naming: views start with v_. A view stores nothing: it is a saved query that calculates
+-- its result from the tables every time it is read, so it can't go stale. It also can't have
+-- foreign keys, which is why SQL clients draw no relationship lines to it.
 
 -------------------------------------------------------------------------------
 -- Location
@@ -35,7 +39,7 @@ $$;
 
 -- How full each vessel is, calculated from its items (never stored, so it can't drift).
 -- Only items measured by volume count towards the fill; mass/count units are ignored.
-CREATE VIEW inventory.vessel_fill AS
+CREATE VIEW inventory.v_vessel_fill AS
 SELECT
     v.id                                   AS vessel_id,
     v.max_volume_ul,
@@ -54,9 +58,9 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    fill inventory.vessel_fill%ROWTYPE;
+    fill inventory.v_vessel_fill%ROWTYPE;
 BEGIN
-    SELECT * INTO fill FROM inventory.vessel_fill WHERE vessel_id = NEW.in_vessel;
+    SELECT * INTO fill FROM inventory.v_vessel_fill WHERE vessel_id = NEW.in_vessel;
     IF fill.max_volume_ul IS NOT NULL AND fill.total_volume_ul > fill.max_volume_ul THEN
         RAISE EXCEPTION 'Vessel % over capacity: % uL of % uL',
             NEW.in_vessel, fill.total_volume_ul, fill.max_volume_ul;
@@ -112,7 +116,7 @@ DECLARE
     child_unit   units%ROWTYPE;
     taken        NUMERIC;   -- p_amount converted into the parent's unit
     child_id     INTEGER;
-    status       RECORD;    -- the parent's row from item_status
+    status       RECORD;    -- the parent's row from v_item_status
     acting_user  INTEGER := COALESCE(p_user, NULLIF(current_setting('app.user_id', true), '')::INTEGER);
 BEGIN
     -- 1. Validate the request
@@ -135,7 +139,7 @@ BEGIN
 
     -- Red material can't be used. Yellow is allowed: QC itself consumes material from
     -- a pending lot, and planning decides what to do with reserved / in-use items.
-    SELECT * INTO status FROM inventory.item_status WHERE item_id = p_parent;
+    SELECT * INTO status FROM inventory.v_item_status WHERE item_id = p_parent;
     IF status.light = 'red' THEN
         RAISE EXCEPTION 'Item % is red (%) and cannot be used',
             p_parent, array_to_string(status.red_reasons, ', ');
@@ -325,7 +329,7 @@ $$;
 -- ADDING A STATE: add the boolean (as a column in 01-schema.sql, or calculated in `flags`
 -- below), then add ONE line to red_reasons or yellow_reasons. The colour follows automatically.
 
-CREATE VIEW inventory.item_status AS
+CREATE VIEW inventory.v_item_status AS
 WITH qc AS (
     -- QC flags come from every lot the item depends on: its own lot plus its ancestors' lots.
     -- So failing a lot turns everything made from it red, at any depth.
@@ -396,15 +400,15 @@ FROM reasons r;
 
 -- Brief question 1: how much do we have, and how much of it is usable?
 -- Totals per material category and colour, in each dimension's base unit (uL / ug / pcs).
--- Usage: SELECT * FROM inventory.material_quantities WHERE material = 'Target proteins';
-CREATE VIEW inventory.material_quantities AS
+-- Usage: SELECT * FROM inventory.v_material_quantities WHERE material = 'Target proteins';
+CREATE VIEW inventory.v_material_quantities AS
 SELECT
     m.name                       AS material,
     u.dimension,
     s.light,
     COUNT(*)                     AS n_items,
     SUM(s.quantity * u.to_base)  AS total_base_unit
-FROM inventory.item_status s
+FROM inventory.v_item_status s
 JOIN materials m ON m.id = s.material
 JOIN units u     ON u.code = s.unit
 GROUP BY m.name, u.dimension, s.light;

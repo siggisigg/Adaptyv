@@ -1,0 +1,29 @@
+%% file: traffic-light
+flowchart LR
+    subgraph Recorded["Recorded: set by people or systems"]
+        direction TB
+        d[discarded<br/>item / vessel / plate]
+        s[shipped]
+        qf[lots.qc_failed]
+        qp[lots.qc_passed]
+        r[reserved]
+        u[in_use]
+        t[in_transit]
+        pr[pending_review]
+    end
+    subgraph Calculated["Calculated: worked out when read, can't go stale"]
+        direction TB
+        e["expired<br/>expires_at ≤ now"]
+        z[empty<br/>quantity = 0]
+        es[expires_soon<br/>within 7 days]
+        qpe[qc_pending<br/>neither QC flag set]
+        qfi[qc_failed inherited<br/>via lineage]
+    end
+    d & s & e & z & qf & qfi --> RED((RED<br/>not usable))
+    qpe & r & u & t & pr & es --> YEL((YELLOW<br/>usable, needs attention<br/>or spoken for))
+    qp -.-> qpe
+    none[no red or yellow<br/>flag active] --> GRN((GREEN<br/>usable and free))
+
+    style RED fill:#e74c3c,color:#fff
+    style YEL fill:#f1c40f
+    style GRN fill:#2ecc71,color:#fff

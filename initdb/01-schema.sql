@@ -48,7 +48,7 @@ CREATE TABLE inventory.lots (
     received_at              TIMESTAMPTZ,
     comment                  TEXT,
     created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- Traffic-light flags (see item_status in 03-functions.sql). QC pending = neither flag set.
+    -- Traffic-light flags (see v_item_status in 03-functions.sql). QC pending = neither flag set.
     -- Items made from this lot inherit these through item_lineage.
     qc_passed                BOOLEAN NOT NULL DEFAULT FALSE,
     qc_failed                BOOLEAN NOT NULL DEFAULT FALSE,
@@ -123,8 +123,8 @@ CREATE TABLE inventory.items (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at       TIMESTAMPTZ,
     -- Traffic-light flags: recorded facts only. Facts that follow from other data
-    -- (expired, empty, QC) are calculated in item_status, so they can't go stale.
-    -- New state = new BOOLEAN NOT NULL DEFAULT FALSE column + one line in item_status.
+    -- (expired, empty, QC) are calculated in v_item_status, so they can't go stale.
+    -- New state = new BOOLEAN NOT NULL DEFAULT FALSE column + one line in v_item_status.
     in_use           BOOLEAN NOT NULL DEFAULT FALSE,   -- yellow: on the bench / in an instrument right now
     reserved         BOOLEAN NOT NULL DEFAULT FALSE,   -- yellow: set by experiment planning
     in_transit       BOOLEAN NOT NULL DEFAULT FALSE,   -- yellow: on the move between locations

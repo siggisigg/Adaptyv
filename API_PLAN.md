@@ -176,7 +176,7 @@ The database's own messages ("Item 2 is red (discarded) and cannot be used") are
 | Method | Path | Does |
 |---|---|---|
 | POST | `/vessels` | Create a tube (barcode, parent, max volume) |
-| GET | `/vessels/{barcode}` | The tube plus its fill from `vessel_fill` and its items with their colours |
+| GET | `/vessels/{barcode}` | The tube plus its fill from `v_vessel_fill` and its items with their colours |
 | POST | `/vessels/{barcode}/move`, `/discard` | |
 
 ### Lots and QC (Q4: bad batch)
@@ -192,7 +192,7 @@ The database's own messages ("Item 2 is red (discarded) and cannot be used") are
 | Method | Path | Does |
 |---|---|---|
 | POST | `/items` | Receive a bought item into a vessel (lot, quantity, unit, expiry) |
-| **GET** | **`/items/{id}`** | The item, its `item_status` (colour plus reasons) and its location |
+| **GET** | **`/items/{id}`** | The item, its `v_item_status` (colour plus reasons) and its location |
 | GET | `/items?material=&light=&expiring_within_days=` | Filtered list for planners and scientists |
 | PATCH | `/items/{id}/flags` | Set `reserved`, `in_use` or `in_transit` |
 | POST | `/items/{id}/discard`, `/ship` | Red states that end an item's life |
@@ -208,7 +208,7 @@ The database's own messages ("Item 2 is red (discarded) and cannot be used") are
 
 | Method | Path | Does |
 |---|---|---|
-| **GET** | **`/reports/material-quantities`** | `material_quantities`: totals per category and colour (Q1) |
+| **GET** | **`/reports/material-quantities`** | `v_material_quantities`: totals per category and colour (Q1) |
 | GET | `/reports/expiring?days=7` | Items that have expired or expire soon (Q2) |
 
 ### Audit (Q5)

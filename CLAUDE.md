@@ -44,6 +44,7 @@ docker compose exec postgres psql -U app -d app  # SQL shell (DBeaver: localhost
 docker compose exec api pytest -v              # API tests
 docker compose exec api pytest -v tests/test_plumbing.py::test_failed_request_keeps_none_of_its_writes   # one test
 docker compose logs -f api                     # API logs (uvicorn --reload restarts on code edits)
+docs/render-diagrams.sh                        # README mermaid blocks -> docs/diagrams/*.svg/png (Docker image minlag/mermaid-cli)
 ```
 
 `./initdb` is mounted into `/docker-entrypoint-initdb.d`, but Postgres only runs it when the `postgres_data` volume is **empty**. After any SQL change, do a full rebuild (`down -v`). This deletes all data in the DB.
@@ -64,7 +65,7 @@ This is a thin FastAPI layer (see `API_PLAN.md`). Business rules stay in SQL. Th
 - The user currently comes from an `X-User-Id` header. That's **dev-only**, until login (build step 5).
 - Tests (`tests/conftest.py`) run against the real `app` DB in a transaction that's always rolled back. Each request gets a savepoint. `make_client(app)` builds a client for any app, which `test_plumbing.py` uses for test-only routes.
 
-`README.md` is the reviewer-facing write-up, with Mermaid diagrams. Keep it in sync when the schema changes, especially the questions-answered, assumptions and cuts sections at the end.
+`README.md` is the reviewer-facing write-up, with Mermaid diagrams. It is the **single source** for `docs/diagrams/`: edit the Mermaid block in the README, then re-run `docs/render-diagrams.sh`. Never edit the generated files. Each block's first line, `%% file: <name>`, sets its output file name. Keep it in sync when the schema changes, especially the questions-answered, assumptions and cuts sections at the end.
 
 ## Schema layout (`initdb/`)
 
@@ -82,7 +83,7 @@ These design decisions are settled:
 - **Location:** `storage_unit` nests through its `stored_in` parent pointer (no arrays). `storage_unit_contents()` walks down the tree, with a `CYCLE` guard.
 - **Kinds:** `storage_unit.kind` → `storage_unit_kinds`. Each kind says how its capacity works: `has_grid` means fixed slots, and `max_children` is a count limit. Neither is enforced yet.
 - **Plates:** a plate is a `storage_unit` with `n_rows`/`n_cols`. Each well is a `vessel` with a `position`, and `UNIQUE (stored_in, position)` stops two vessels sharing a slot.
-- **Quantities:** `items.quantity` + `unit` → `units` (each unit has a dimension and a factor to the base unit). A vessel's fill level is **calculated** in the `vessel_fill` view, never stored. `max_volume_ul` is a hard limit enforced by a trigger on `items`.
+- **Quantities:** `items.quantity` + `unit` → `units` (each unit has a dimension and a factor to the base unit). A vessel's fill level is **calculated** in the `v_vessel_fill` view, never stored. `max_volume_ul` is a hard limit enforced by a trigger on `items`.
 - **Consumption:** all material movement goes through `inventory.transfer()`, which in one atomic step decreases the parent, creates or increases the child and records `item_lineage`. Don't write `item_lineage` or change quantities by hand.
 - **One liquid per vessel:** partial unique index `items_one_live_item_per_vessel`. `transfer()` into an occupied vessel empties the existing item into a new mixture item, with both as lineage parents.
 - **Batches:** `transfer_batch(jsonb)` is all-or-nothing, with per-line savepoints. On failure it rolls back every line, files the raw request in `transfer_batches`/`transfer_batch_lines` (no foreign keys, on purpose) and sets `pending_review`. `apply_transfer_batch()` re-checks every line, and `reject_transfer_batch()` applies nothing.
@@ -90,7 +91,7 @@ These design decisions are settled:
 - **Audit:** every change is logged with the old and new row as JSONB. The user and reason come from the transaction-local settings `app.user_id`/`app.context` (`set_config(..., true)`). `transaction_id` groups one action. A new data table needs its own `audit_log_change` trigger, with its primary key column(s) as the argument.
 - **Barcodes:** storage units and tubes (`vessel.barcode`, optional) have barcodes. Wells are addressed as plate barcode + position.
 - **Lots:** bought items set `lot_id` → `lots`, which has `UNIQUE (supplier, supplier_lot_number)`. Made items are traced back to lots through `item_lineage`.
-- **Traffic light:** usability is a set of independent booleans. Recorded flags are stored (`items.in_use/reserved/in_transit/discarded/shipped`, `vessel.discarded`, `storage_unit.discarded`, `lots.qc_passed/qc_failed`). Flags that follow from other data (expired, expires_soon, empty, QC via lineage) are calculated in the `item_status` view, never stored. The colour is the most severe active flag. To add a state, add a boolean, then add one line to `red_reasons`/`yellow_reasons`. `transfer()` refuses red parents. See the table in `notes.md`.
+- **Traffic light:** usability is a set of independent booleans. Recorded flags are stored (`items.in_use/reserved/in_transit/discarded/shipped`, `vessel.discarded`, `storage_unit.discarded`, `lots.qc_passed/qc_failed`). Flags that follow from other data (expired, expires_soon, empty, QC via lineage) are calculated in the `v_item_status` view, never stored. The colour is the most severe active flag. To add a state, add a boolean, then add one line to `red_reasons`/`yellow_reasons`. `transfer()` refuses red parents. See the table in `notes.md`.
 - **Consumables:** countable consumables live in `stock`. Using one decreases its count, and any plate or tube made from it records `from_stock`.
 
 These are still open:

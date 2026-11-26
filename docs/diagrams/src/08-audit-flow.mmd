@@ -1,0 +1,10 @@
+%% file: audit-flow
+flowchart LR
+    API["API request<br/>user 7: plate transfer"] -->|"set_config('app.user_id', '7', true)<br/>set_config('app.context', ..., true)"| TX
+    subgraph TX["One transaction"]
+        direction TB
+        T1["transfer() well A1"] --> T2["transfer() well A2"] --> T3["... x96"]
+    end
+    TX -->|"audit trigger on each changed row"| LOG[("audit.log<br/>changed_by = 7<br/>context = plate transfer<br/>same transaction_id<br/>old_row / new_row")]
+    LOG --> H["audit.history(table, key)<br/>every change to one record"]
+    LOG --> A["audit.as_of(table, key, time)<br/>what it said back then"]

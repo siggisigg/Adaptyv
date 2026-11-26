@@ -31,6 +31,7 @@ Any SQL client (for example DBeaver) can connect at `localhost:5432`, database `
 ## 1. The model at a glance
 
 ```mermaid
+%% file: er-diagram
 erDiagram
     storage_unit_kinds ||--o{ storage_unit : "kind of"
     storage_unit |o--o{ storage_unit : "stored_in (nesting)"
@@ -47,6 +48,36 @@ erDiagram
     items ||--o{ item_lineage : "parent_item"
     items ||--o{ item_lineage : "child_item"
     users |o--o{ item_lineage : "created_by"
+    users |o--o{ transfer_batches : "requested_by"
+    transfer_batches ||--o{ transfer_batch_lines : "lines (raw request, no FKs)"
+    users |o--o{ audit_log : "changed_by"
+
+    users {
+        INT id PK
+        TEXT username
+    }
+    transfer_batches {
+        INT id PK
+        TEXT context
+        BOOL applied
+        BOOL rejected
+    }
+    transfer_batch_lines {
+        INT batch_id PK
+        INT line_no PK
+        INT parent_item "raw, no FK"
+        NUMERIC amount
+        BOOL would_succeed
+        TEXT error
+    }
+    audit_log {
+        BIGINT id PK
+        BIGINT transaction_id "groups one action"
+        TEXT table_name
+        TEXT row_key
+        JSONB old_row
+        JSONB new_row
+    }
 
     storage_unit {
         TEXT barcode PK
@@ -77,6 +108,7 @@ erDiagram
         BOOL in_transit
         BOOL discarded
         BOOL shipped
+        BOOL pending_review
     }
     item_lineage {
         INT parent_item PK
@@ -123,6 +155,8 @@ The model is built from four ideas:
 | **What and how much** | `items` | A physical amount of one material in one vessel, with a quantity and a unit. |
 | **From what** | `item_lineage`, `lots` | Every item made from other items records its parents. Bought items record their supplier lot. |
 
+**Tables store facts, `v_` views calculate.** Everything that follows from recorded facts (how full a vessel is, an item's colour, totals per material) is a view: a saved query that's worked out from the tables each time it's read, and never stored. It can't go stale or contradict the facts. Views can't have foreign keys, so database tools show them unconnected. Their connections are the joins inside their SQL.
+
 `stock` holds countable consumables (tips, empty plates, chips). `units`, `storage_unit_kinds` and `materials` are lookup tables, so a new unit, storage kind or material category is a **new row, not a schema change**.
 
 ---
@@ -130,6 +164,7 @@ The model is built from four ideas:
 ## 2. Storage locations, and things that move between them
 
 ```mermaid
+%% file: location-hierarchy
 flowchart TD
     R[Room: storage_unit kind=room] --> F[Freezer -80: kind=freezer]
     R --> B[Bench: kind=bench]
@@ -141,15 +176,14 @@ flowchart TD
     P --> W2([Well A2: vessel])
     T1 --> I1[[item: 800 uL target]]
     W1 --> I2[[item: 100 uL target]]
-    W2 --> I3[[item: 50 uL sample]]
-    W2 --> I4[[item: 50 uL buffer]]
+    W2 --> I3[[item: 100 uL mixture<br/>parents: sample + buffer]]
 
     classDef su fill:#e8eef7,stroke:#4a6fa5
     classDef v fill:#eef7e8,stroke:#5a9a4a
     classDef it fill:#fff6e0,stroke:#c79a2a
     class R,F,B,K,X,P su
     class T1,W1,W2 v
-    class I1,I2,I3,I4 it
+    class I1,I2,I3 it
 ```
 
 - **Nesting uses a parent pointer.** `storage_unit.stored_in` references another storage unit, and NULL means a top-level place. An earlier draft also kept a list of children in an array column. That was removed, because Postgres can't enforce foreign keys on array elements, and two copies of the same relationship eventually disagree.
@@ -161,7 +195,7 @@ flowchart TD
 ## 3. Quantities and capacity
 
 - **Every item has `quantity` + `unit`.** `units` maps each unit to a dimension and a conversion factor (1 mL → 1000 µL), so different units can be added together and converted safely.
-- **A vessel's fill level is calculated, never stored.** The `vessel_fill` view adds up the vessel's items, so it can't get out of step with them.
+- **A vessel's fill level is calculated, never stored.** The `v_vessel_fill` view adds up the vessel's items, so it can't get out of step with them.
 - **`max_volume_ul` is a hard limit**, enforced by a trigger on `items`. Overfilling a well raises an error and the whole operation is undone.
 - **Duplicate deliveries are rejected:** `UNIQUE (supplier, supplier_lot_number)` stops the same lot being registered twice.
 
@@ -172,6 +206,7 @@ All material movement goes through one function. It takes an amount out of a par
 **One liquid per vessel.** Once two liquids are in the same well, they physically *are* one liquid. So a vessel holds at most one item with quantity > 0, enforced by a partial unique index (`UNIQUE (in_vessel) WHERE quantity > 0`). Transferring into a vessel that already has content empties the existing item into a **new mixture item**, which records both inputs as parents:
 
 ```mermaid
+%% file: mixing
 flowchart LR
     B["item 5: buffer 50 µL<br/>(now 0, kept as history)"] -- 50 µL --> M["item 9: buffer + sample 70 µL<br/>in DST A1"]
     S["item 1: sample, SRC A1"] -- 20 µL --> M
@@ -183,7 +218,8 @@ flowchart LR
 - **A new item, not a grown one.** The old item keeps a true record ("this was 50 µL of buffer"), and the lineage records exactly how much of each input went in.
 
 ```mermaid
-flowchart TD
+%% file: transfer-flow
+flowchart LR
     A["transfer(parent, amount, unit, to_vessel | to_item)"] --> B{"Valid request?<br/>one target, amount &gt; 0"}
     B -- no --> X[ERROR: whole call undone]
     B -- yes --> C[Lock parent row<br/>SELECT ... FOR UPDATE]
@@ -193,10 +229,11 @@ flowchart TD
     E -- no --> X
     E -- yes --> F[Decrease parent quantity]
     F --> G{to_vessel or to_item?}
-    G -- to_vessel --> H[Create new child item]
+    G -- to_vessel --> V{Vessel already<br/>holds a liquid?}
+    V -- no --> H[Create new item]
+    V -- yes --> MX[Empty existing item into<br/>NEW mixture item<br/>both become parents]
     G -- to_item --> I[Increase existing item]
-    H --> J{Vessel over capacity?<br/>trigger}
-    I --> J
+    H & MX & I --> J{Vessel over capacity?<br/>trigger}
     J -- yes --> X
     J -- no --> K[Record item_lineage edge<br/>parent → child, quantity_used]
     K --> L[Return child id: COMMIT]
@@ -217,6 +254,7 @@ SELECT inventory.transfer(4, 2,   'mL', p_to_item   => 12); -- add 2 mL of item 
 ## 5. Lineage: where did it come from, and where did it go?
 
 ```mermaid
+%% file: lineage
 flowchart LR
     L1[(Lot T-778<br/>qc_failed)]:::bad --> T[Target tube<br/>item 1]:::bad
     T -- 100 uL --> A1[Well A1<br/>item 4]:::bad
@@ -243,9 +281,10 @@ Lineage is a **graph, not a tree**. A mixture has several parents, so the same i
 
 ## 6. Usable vs merely exists: the traffic light
 
-Every state is an **independent boolean**. The colour is **calculated** in the `item_status` view: the most severe active flag wins, and the view also lists *why* in `red_reasons` and `yellow_reasons`.
+Every state is an **independent boolean**. The colour is **calculated** in the `v_item_status` view: the most severe active flag wins, and the view also lists *why* in `red_reasons` and `yellow_reasons`.
 
 ```mermaid
+%% file: traffic-light
 flowchart LR
     subgraph Recorded["Recorded: set by people or systems"]
         direction TB
@@ -269,8 +308,7 @@ flowchart LR
     d & s & e & z & qf & qfi --> RED((RED<br/>not usable))
     qpe & r & u & t & pr & es --> YEL((YELLOW<br/>usable, needs attention<br/>or spoken for))
     qp -.-> qpe
-    RED ~~~ GRN((GREEN<br/>usable and free))
-    YEL ~~~ GRN
+    none[no red or yellow<br/>flag active] --> GRN((GREEN<br/>usable and free))
 
     style RED fill:#e74c3c,color:#fff
     style YEL fill:#f1c40f
@@ -281,7 +319,7 @@ flowchart LR
 - **Each flag lives on the object it describes.** QC belongs to the **lot**, so failing a lot later turns **everything made from it red, at any depth**, without updating a single item. Discarding belongs to the **container**, so throwing a plate away turns all its wells red.
 - **Contradictory combinations are blocked** by `CHECK` constraints: a lot can't be both `qc_passed` and `qc_failed`, and an item can't be both `discarded` and `shipped`.
 - **Adding a state** means adding a boolean, then adding one line to `red_reasons` or `yellow_reasons`. The colour updates automatically.
-- **`material_quantities`** gives totals per material category and colour. That answers the brief's question "how much do we have, and how much of it is usable?"
+- **`v_material_quantities`** gives totals per material category and colour. That answers the brief's question "how much do we have, and how much of it is usable?"
 
 ---
 
@@ -290,7 +328,8 @@ flowchart LR
 A robot copying a 96-well plate is one action, but the database's unit of work is one well. `transfer_batch(lines)` runs many transfers as **one all-or-nothing action**. If a line fails, the run isn't lost: it's **filed for a person to decide on**.
 
 ```mermaid
-flowchart TD
+%% file: batch-flow
+flowchart LR
     R["transfer_batch(96 lines)"] --> L["Try each line in its own savepoint<br/>(BEGIN ... EXCEPTION block)<br/>record OK or the database's reason"]
     L --> Q{Any line failed?}
     Q -- no --> OK["All applied: COMMIT<br/>audit groups it by transaction_id"]
@@ -319,6 +358,7 @@ flowchart TD
 Every insert, update and delete on the data and reference tables is recorded in `audit.log` by one generic trigger. Each entry holds the **full old and new row** as JSONB, plus who made the change, why, and which action it belonged to.
 
 ```mermaid
+%% file: audit-flow
 flowchart LR
     API["API request<br/>user 7: plate transfer"] -->|"set_config('app.user_id', '7', true)<br/>set_config('app.context', ..., true)"| TX
     subgraph TX["One transaction"]
@@ -354,8 +394,8 @@ SELECT * FROM audit.log WHERE transaction_id = 81234;                       -- e
 
 | # | Question | Answered by |
 |---|---|---|
-| 1 | How much do we have, and how much is usable? | `material_quantities` view; `item_status.light` per item |
-| 2 | Is it still viable? What expires soon? | `item_status` flags `expired` and `expires_soon` |
+| 1 | How much do we have, and how much is usable? | `v_material_quantities` view; `v_item_status.light` per item |
+| 2 | Is it still viable? What expires soon? | `v_item_status` flags `expired` and `expires_soon` |
 | 3 | Where is it? | `items.in_vessel` → `vessel.stored_in` → `storage_unit.stored_in` chain; `storage_unit_contents()` |
 | 4 | Where did it come from and where did it go? | `lot_trace()`, `item_ancestors()`, `item_descendants()` |
 | 5 | Who changed what, and when? What did it say before? | `audit.log`, `audit.history()`, `audit.as_of()` |

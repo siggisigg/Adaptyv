@@ -22,7 +22,7 @@ Implemented as `inventory.storage_unit_contents(parent_barcode TEXT)`, using a S
 
 ## Traffic light (usable vs merely exists)
 
-Every state is an independent boolean, and the colour is **calculated** from them in `inventory.item_status`. The most severe active flag wins. The view also lists *why* in `red_reasons` and `yellow_reasons`.
+Every state is an independent boolean, and the colour is **calculated** from them in `inventory.v_item_status`. The most severe active flag wins. The view also lists *why* in `red_reasons` and `yellow_reasons`.
 
 | Flag | Colour | Kind | Lives on | Meaning |
 |---|---|---|---|---|
@@ -43,11 +43,11 @@ Every state is an independent boolean, and the colour is **calculated** from the
 - **Contradictions blocked by `CHECK`:** `qc_passed AND qc_failed`, and `discarded AND shipped`.
 - **`transfer()` refuses red parents.** Yellow is allowed, because QC itself consumes material from a pending lot.
 - **Adding a state:** add the boolean column (or calculate it in `flags`), then add one line to `red_reasons` or `yellow_reasons`.
-- **For planning:** green = usable and free now. Yellow = usable but needs attention or is spoken for. `material_quantities` gives totals per category and colour (brief Q1).
+- **For planning:** green = usable and free now. Yellow = usable but needs attention or is spoken for. `v_material_quantities` gives totals per category and colour (brief Q1).
 
 Open points:
 - The 7-day "expires soon" window is one fixed value, but loading buffer only lasts 1 week. It should be set per material type.
 - Discarding only looks one level up (vessel → its storage unit). A thrown-away box inside a discarded rack isn't caught.
 - In-house made material has no QC (no lot), so it never shows `qc_pending`.
-- `item_status` calls `item_ancestors()` for every item, which is fine at lab scale. At large scale you'd cache it (materialised view) or store a denormalised lot set.
+- `v_item_status` calls `item_ancestors()` for every item, which is fine at lab scale. At large scale you'd cache it (materialised view) or store a denormalised lot set.
 - Recorded flags don't say *who* set them or *when*. That's for the audit log.

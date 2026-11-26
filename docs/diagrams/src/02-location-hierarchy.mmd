@@ -1,0 +1,20 @@
+%% file: location-hierarchy
+flowchart TD
+    R[Room: storage_unit kind=room] --> F[Freezer -80: kind=freezer]
+    R --> B[Bench: kind=bench]
+    F --> K[Rack A: kind=rack]
+    K --> X[Box 1: kind=box, 9x9 grid]
+    F --> P[Plate 1: kind=plate, 8x12 grid]
+    X --> T1([Tube: vessel, position C4])
+    P --> W1([Well A1: vessel])
+    P --> W2([Well A2: vessel])
+    T1 --> I1[[item: 800 uL target]]
+    W1 --> I2[[item: 100 uL target]]
+    W2 --> I3[[item: 100 uL mixture<br/>parents: sample + buffer]]
+
+    classDef su fill:#e8eef7,stroke:#4a6fa5
+    classDef v fill:#eef7e8,stroke:#5a9a4a
+    classDef it fill:#fff6e0,stroke:#c79a2a
+    class R,F,B,K,X,P su
+    class T1,W1,W2 v
+    class I1,I2,I3 it

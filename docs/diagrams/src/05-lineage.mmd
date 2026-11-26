@@ -1,0 +1,13 @@
+%% file: lineage
+flowchart LR
+    L1[(Lot T-778<br/>qc_failed)]:::bad --> T[Target tube<br/>item 1]:::bad
+    T -- 100 uL --> A1[Well A1<br/>item 4]:::bad
+    T -- 100 uL --> A2[Well A2<br/>item 5]:::bad
+    A1 -- 50 uL --> M[Binding mix<br/>item 6]:::bad
+    A2 -- 20 uL --> M
+    L2[(Lot PBS-01<br/>qc_passed)]:::ok --> P[PBS bottle<br/>item 2]:::ok
+    P -- 11 mL --> BUF[Assay buffer<br/>item 3]:::ok
+    BUF -- 50 uL --> M
+
+    classDef bad fill:#fbe3e3,stroke:#c0392b
+    classDef ok fill:#e3f6e3,stroke:#2e8b57

@@ -1,0 +1,22 @@
+%% file: transfer-flow
+flowchart LR
+    A["transfer(parent, amount, unit, to_vessel | to_item)"] --> B{"Valid request?<br/>one target, amount &gt; 0"}
+    B -- no --> X[ERROR: whole call undone]
+    B -- yes --> C[Lock parent row<br/>SELECT ... FOR UPDATE]
+    C --> D{Parent red?<br/>discarded, expired, QC failed...}
+    D -- yes --> X
+    D -- no --> E{Same dimension<br/>and enough left?}
+    E -- no --> X
+    E -- yes --> F[Decrease parent quantity]
+    F --> G{to_vessel or to_item?}
+    G -- to_vessel --> V{Vessel already<br/>holds a liquid?}
+    V -- no --> H[Create new item]
+    V -- yes --> MX[Empty existing item into<br/>NEW mixture item<br/>both become parents]
+    G -- to_item --> I[Increase existing item]
+    H & MX & I --> J{Vessel over capacity?<br/>trigger}
+    J -- yes --> X
+    J -- no --> K[Record item_lineage edge<br/>parent → child, quantity_used]
+    K --> L[Return child id: COMMIT]
+
+    style X fill:#fbe3e3,stroke:#c0392b
+    style L fill:#e3f6e3,stroke:#2e8b57

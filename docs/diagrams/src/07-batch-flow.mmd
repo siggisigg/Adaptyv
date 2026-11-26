@@ -1,0 +1,16 @@
+%% file: batch-flow
+flowchart LR
+    R["transfer_batch(96 lines)"] --> L["Try each line in its own savepoint<br/>(BEGIN ... EXCEPTION block)<br/>record OK or the database's reason"]
+    L --> Q{Any line failed?}
+    Q -- no --> OK["All applied: COMMIT<br/>audit groups it by transaction_id"]
+    Q -- yes --> U["Undo EVERY line<br/>(roll back to the batch savepoint)"]
+    U --> F["File the request in transfer_batches / transfer_batch_lines<br/>per line: would_succeed + error<br/>set pending_review (yellow) on items involved<br/>COMMIT the filing"]
+    F --> D{"A person decides, later,<br/>in a new transaction"}
+    D -- "fix lines, then apply" --> A["apply_transfer_batch()<br/>re-checks EVERY line against current inventory<br/>still all or nothing"]
+    D -- "apply successful lines only" --> A2["apply_transfer_batch(p_only_ok => TRUE)<br/>failed lines stay on record"]
+    D -- reject --> X["reject_transfer_batch()"]
+    A & A2 & X --> C["Clear pending_review<br/>(unless another pending batch touches the item)"]
+
+    style OK fill:#e3f6e3,stroke:#2e8b57
+    style U fill:#fbe3e3,stroke:#c0392b
+    style F fill:#fff6e0,stroke:#c79a2a
