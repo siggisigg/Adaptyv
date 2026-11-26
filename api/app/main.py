@@ -4,7 +4,7 @@ from fastapi import FastAPI
 
 from app import errors
 from app.db import pool
-from app.routers import health
+from app.routers import batches, health, items, locations, lots, reports, transfers, vessels
 
 
 @asynccontextmanager
@@ -17,9 +17,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Lab Inventory API",
-    description="Thin API over the inventory database. Business rules live in SQL.",
+    description=(
+        "Thin API over the inventory database. Business rules live in SQL.\n\n"
+        "**Material only moves through the `transfers` endpoints**, which call the database "
+        "functions `inventory.transfer()` and `inventory.transfer_batch()`."
+    ),
     lifespan=lifespan,
 )
 
 errors.register(app)
-app.include_router(health.router)
+for module in (health, locations, vessels, lots, items, transfers, batches, reports):
+    app.include_router(module.router)

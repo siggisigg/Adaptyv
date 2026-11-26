@@ -431,7 +431,7 @@ SELECT * FROM audit.log WHERE transaction_id = 81234;                       -- e
 |---|---|---|
 | 1 | How much do we have, and how much is usable? | `v_material_quantities` view; `v_item_status.light` per item |
 | 2 | Is it still viable? What expires soon? | `v_item_status` flags `expired` and `expires_soon` |
-| 3 | Where is it? | `items.in_vessel` → `vessel.stored_in` → `storage_unit.stored_in` chain; `storage_unit_contents()` |
+| 3 | Where is it? | `items.in_vessel` → `vessel.stored_in` → `storage_unit.stored_in` chain; `location_path()` (walking up) and `storage_unit_contents()` (walking down) |
 | 4 | Where did it come from and where did it go? | `lot_trace()`, `item_ancestors()`, `item_descendants()` |
 | 5 | Who changed what, and when? What did it say before? | `audit.log`, `audit.history()`, `audit.as_of()` |
 
@@ -457,5 +457,4 @@ Depth on consumption, lineage and usability was prioritised over breadth.
 | **Expires-soon window per material** | It's a fixed 7 days. Loading buffer only lasts 1 week in total, so it would show yellow from the day it's made. |
 | **Material-definition layer** | `materials` holds categories (DNA, Target proteins…). A real system needs "target protein PD-L1" between the category and the lot. |
 | **Enforcing storage-kind capacity** | `has_grid`/`max_children` describe the rules, but no trigger enforces them yet. Grid positions aren't checked against the grid size either. |
-| **Full location path function** | Walking *up* the tree ("Room > Freezer > Rack > Box"). It's the mirror of `storage_unit_contents`. |
 | **Edge cases accepted** | Lowering a vessel's `max_volume_ul` isn't checked. Discarding only looks one level up (vessel → its plate). Locking is per item, so two concurrent inserts into the same well could each pass the capacity check. |

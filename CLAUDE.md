@@ -62,6 +62,9 @@ That fails against an already-initialised DB, because the objects already exist.
 This is a thin FastAPI layer (see `API_PLAN.md`). Business rules stay in SQL. The API calls the functions and views, and maps Postgres errors to HTTP in `app/errors.py` (by SQLSTATE: `P0001`→422, `23505`→409, unknown→500 without the DB message).
 
 - `app/db.py`: `AsyncConnectionPool` (psycopg 3, `dict_row`). Endpoints take `conn: Conn`, and `get_conn()` gives each request **one transaction**. It commits on return and rolls back on raise. `start_request()` sets `app.user_id`/`app.context` with `set_config(..., true)` for the audit log. Use `set_context(conn, "...")` for a readable audit context.
+- Routers live in `app/routers/`. **Only `transfers.py` moves material**, and only by calling `inventory.transfer()`/`transfer_batch()`. Batch resolution (`batches.py`) calls `apply_/reject_transfer_batch()`. Never update `items.quantity` or `item_lineage` from Python. Each endpoint's docstring names the DB function it triggers (shown in `/docs`), and each call is logged to `uvicorn.error`.
+- Dry runs use `conn.transaction(force_rollback=True)`, a savepoint that is always undone. A failed batch returns **202** because the filing is committed.
+- Request bodies refer to vessels and items by id. URLs use barcodes for anything with a label (plates, tubes; wells as `/plates/{barcode}/wells/{position}`). `GET /scan/{barcode}` resolves a barcode to a record.
 - The user currently comes from an `X-User-Id` header. That's **dev-only**, until login (build step 5).
 - Tests (`tests/conftest.py`) run against the real `app` DB in a transaction that's always rolled back. Each request gets a savepoint. `make_client(app)` builds a client for any app, which `test_plumbing.py` uses for test-only routes.
 

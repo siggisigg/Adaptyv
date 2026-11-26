@@ -1,4 +1,6 @@
-# API Plan (draft)
+# API Plan
+
+> **Status:** steps 1–4 are built (`api/`, 23 tests). Remaining: step 5, login and the restricted database role. The user currently comes from a dev-only `X-User-Id` header.
 
 A small **FastAPI** service in front of the inventory database. It's the interface that scanners, lab scientists, robots and the experiment-planning system would use.
 

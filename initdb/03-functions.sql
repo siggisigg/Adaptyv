@@ -33,6 +33,28 @@ AS $$
     ORDER BY tree.depth, tree.barcode;
 $$;
 
+-- Full location of a storage unit, walking UP the tree: 'ROOM-1 > FRZ-1 > RACK-A > BOX-1'.
+-- The mirror of storage_unit_contents(), with the same CYCLE guard.
+-- Usage: SELECT inventory.location_path('BOX-1');
+CREATE FUNCTION inventory.location_path(p_barcode TEXT)
+RETURNS TEXT
+LANGUAGE sql
+STABLE
+AS $$
+    WITH RECURSIVE up AS (
+        SELECT su.barcode, su.stored_in, 0 AS depth
+        FROM inventory.storage_unit su
+        WHERE su.barcode = p_barcode
+        UNION ALL
+        SELECT su.barcode, su.stored_in, up.depth + 1
+        FROM inventory.storage_unit su
+        JOIN up ON su.barcode = up.stored_in
+    ) CYCLE barcode SET is_cycle USING visited
+    SELECT string_agg(up.barcode, ' > ' ORDER BY up.depth DESC)
+    FROM up
+    WHERE NOT up.is_cycle;
+$$;
+
 -------------------------------------------------------------------------------
 -- Vessel capacity
 -------------------------------------------------------------------------------

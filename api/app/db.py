@@ -16,7 +16,7 @@ import os
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import Depends, Header, Request
+from fastapi import Depends, Header, HTTPException, Request
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
@@ -65,3 +65,17 @@ async def set_context(conn: AsyncConnection, context: str) -> None:
 
 # Shorthand for endpoint signatures:  async def endpoint(conn: Conn): ...
 Conn = Annotated[AsyncConnection, Depends(get_conn)]
+
+
+async def fetch_all(conn: AsyncConnection, query, params=()) -> list[dict]:
+    cur = await conn.execute(query, params)
+    return await cur.fetchall()
+
+
+async def fetch_one_or_404(conn: AsyncConnection, query, params, not_found: str) -> dict:
+    """Run a query that should return one row; respond 404 with `not_found` if it returns none."""
+    cur = await conn.execute(query, params)
+    row = await cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=not_found)
+    return row
