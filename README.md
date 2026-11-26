@@ -9,6 +9,7 @@ initdb/
   01-schema.sql           tables and constraints
   02-reference-data.sql   lookup rows: material categories, units, storage kinds
   03-functions.sql        views, functions and triggers (the behaviour)
+  04-audit.sql            audit log: who changed what, when, and what it said before
 notes.md                  design notes, traffic-light reference, known gaps
 API_PLAN.md               draft plan for the FastAPI layer
 ```
@@ -57,6 +58,7 @@ erDiagram
     }
     vessel {
         INT id PK
+        TEXT barcode "UNIQUE, tubes only"
         TEXT stored_in FK
         TEXT position "well/slot, e.g. A1"
         NUMERIC max_volume_ul "hard limit"
@@ -195,8 +197,8 @@ flowchart TD
 - **Yellow material can still be transferred.** QC itself uses material from a lot whose QC is pending.
 
 ```sql
-SELECT _staging.transfer(1, 100, 'uL', p_to_vessel => 7);  -- aliquot 100 µL of item 1 into vessel 7
-SELECT _staging.transfer(4, 2,   'mL', p_to_item   => 12); -- add 2 mL of item 4 into mixture 12
+SELECT inventory.transfer(1, 100, 'uL', p_to_vessel => 7);  -- aliquot 100 µL of item 1 into vessel 7
+SELECT inventory.transfer(4, 2,   'mL', p_to_item   => 12); -- add 2 mL of item 4 into mixture 12
 ```
 
 ## 5. Lineage: where did it come from, and where did it go?
@@ -269,7 +271,43 @@ flowchart LR
 
 ---
 
-## 7. How the brief's questions are answered
+## 7. Who changed what: the audit log
+
+Every insert, update and delete on the data and reference tables is recorded in `audit.log` by one generic trigger. Each entry holds the **full old and new row** as JSONB, plus who made the change, why, and which action it belonged to.
+
+```mermaid
+flowchart LR
+    API["API request<br/>user 7: plate transfer"] -->|"set_config('app.user_id', '7', true)<br/>set_config('app.context', ..., true)"| TX
+    subgraph TX["One transaction"]
+        direction TB
+        T1["transfer() well A1"] --> T2["transfer() well A2"] --> T3["... x96"]
+    end
+    TX -->|"audit trigger on each changed row"| LOG[("audit.log<br/>changed_by = 7<br/>context = plate transfer<br/>same transaction_id<br/>old_row / new_row")]
+    LOG --> H["audit.history(table, key)<br/>every change to one record"]
+    LOG --> A["audit.as_of(table, key, time)<br/>what it said back then"]
+```
+
+| Column | Answers |
+|---|---|
+| `changed_by` | **Who.** Read from the transaction-local setting `app.user_id`, which the API sets for each request. |
+| `db_role` | Who *connected*. It catches changes made outside the API, for example in psql, where `changed_by` is empty. |
+| `context` | **Why.** For example "plate transfer PLATE-1 → PLATE-2". |
+| `transaction_id` | **Which action.** All 96 well changes from one plate action share it, so a bulk action can be reviewed or traced as one unit. |
+| `changed_columns` | **What** changed. An update that changes nothing isn't logged. |
+| `old_row` / `new_row` | **What it said before**, and after. |
+
+- **One trigger for every table.** The primary key is passed to the trigger as an argument, because the tables use different keys (`id`, `barcode`, `code`, or `parent_item,child_item` for lineage).
+- **Append-only.** Updating, deleting or truncating `audit.log` is rejected. The trigger function is `SECURITY DEFINER`, so the API's database role can *cause* audit rows to be written without being able to write, edit or delete them itself.
+- **`users` is not audited by this trigger,** because its rows contain `password_hash`, which shouldn't be copied into a widely readable log.
+- **`transfer()` fills in `item_lineage.created_by`** from the same `app.user_id` setting, so the API doesn't have to pass the user separately.
+
+```sql
+SELECT * FROM audit.history('inventory.items', '3');                        -- every change to item 3
+SELECT audit.as_of('inventory.items', '3', '2026-11-25 14:00+00');          -- item 3 as it was then
+SELECT * FROM audit.log WHERE transaction_id = 81234;                       -- everything one action did
+```
+
+## 8. How the brief's questions are answered
 
 | # | Question | Answered by |
 |---|---|---|
@@ -277,9 +315,9 @@ flowchart LR
 | 2 | Is it still viable? What expires soon? | `item_status` flags `expired` and `expires_soon` |
 | 3 | Where is it? | `items.in_vessel` → `vessel.stored_in` → `storage_unit.stored_in` chain; `storage_unit_contents()` |
 | 4 | Where did it come from and where did it go? | `lot_trace()`, `item_ancestors()`, `item_descendants()` |
-| 5 | Who changed what, and when? | **Not built yet** (see below) |
+| 5 | Who changed what, and when? What did it say before? | `audit.log`, `audit.history()`, `audit.as_of()` |
 
-## 8. Assumptions
+## 9. Assumptions
 
 - **Experiment planning is a separate system.** It *sets* `reserved`, and the inventory only stores it.
 - **QC applies per supplier lot.** A lot is pending until one of `qc_passed`/`qc_failed` is set. Material made in-house has no lot, so it has no QC state.
@@ -288,14 +326,14 @@ flowchart LR
 - **Moving material between different dimensions is rejected.** `transfer()` won't add µg of DNA into a µL buffer, because concentration isn't modelled.
 - **Lab scale:** the tracing and status views recurse through lineage for each item. That's fine for thousands of items. At much larger scale you'd cache the results.
 
-## 9. What was cut, and why
+## 10. What was cut, and why
 
 Depth on consumption, lineage and usability was prioritised over breadth.
 
 | Cut | Why, and what it would take |
 |---|---|
-| **Audit log (Q5)** | The most important remaining piece. Plan: an `audit_log` table filled by a generic trigger that stores the old and new row as JSONB, plus the user from a session variable set by the API. The `users` table is already in place for this. |
-| **Barcodes on vessels** | Storage units have barcodes, but tubes don't yet. It needs `vessel.barcode TEXT UNIQUE`. |
+| **One barcode namespace** | Tubes (`vessel.barcode`) and storage units have barcodes in separate tables. Nothing stops the same barcode being used in both, which would make a scan ambiguous. It needs a shared barcode registry table, or a check across both tables. |
+| **Audit retention and storage** | Full-row JSONB on every change grows quickly with robot runs. It would need table partitioning by month, plus an archiving policy. |
 | **Expiry that depends on storage conditions** | The brief says lifetime depends on storage and timing. It needs a storage temperature per kind, plus shelf-life rules per material and condition. Today `expires_at` is set directly. |
 | **Expires-soon window per material** | It's a fixed 7 days. Loading buffer only lasts 1 week in total, so it would show yellow from the day it's made. |
 | **Material-definition layer** | `materials` holds categories (DNA, Target proteins…). A real system needs "target protein PD-L1" between the category and the lot. |

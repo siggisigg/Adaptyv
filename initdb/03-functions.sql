@@ -5,8 +5,8 @@
 -------------------------------------------------------------------------------
 
 -- Everything nested inside a storage unit, at any depth (replaces the old nested_units array).
--- Usage: SELECT * FROM _staging.storage_unit_contents('FREEZER-01');
-CREATE FUNCTION _staging.storage_unit_contents(parent_barcode TEXT)
+-- Usage: SELECT * FROM inventory.storage_unit_contents('FREEZER-01');
+CREATE FUNCTION inventory.storage_unit_contents(parent_barcode TEXT)
 RETURNS TABLE (barcode TEXT, description TEXT, stored_in TEXT, depth INTEGER)
 LANGUAGE sql
 STABLE  -- only reads data, so Postgres may optimise calls within one query
@@ -14,12 +14,12 @@ AS $$
     WITH RECURSIVE tree AS (
         -- anchor: the parent itself (depth 0), so cycle detection knows it was visited
         SELECT su.barcode, su.description, su.stored_in, 0 AS depth
-        FROM _staging.storage_unit su
+        FROM inventory.storage_unit su
         WHERE su.barcode = parent_barcode
         UNION ALL
         -- recursive step: units inside anything already found
         SELECT su.barcode, su.description, su.stored_in, tree.depth + 1
-        FROM _staging.storage_unit su
+        FROM inventory.storage_unit su
         JOIN tree ON su.stored_in = tree.barcode
     ) CYCLE barcode SET is_cycle USING visited  -- stops if bad data forms a loop (Postgres 14+)
     SELECT tree.barcode, tree.description, tree.stored_in, tree.depth
@@ -35,28 +35,28 @@ $$;
 
 -- How full each vessel is, calculated from its items (never stored, so it can't drift).
 -- Only items measured by volume count towards the fill; mass/count units are ignored.
-CREATE VIEW _staging.vessel_fill AS
+CREATE VIEW inventory.vessel_fill AS
 SELECT
     v.id                                   AS vessel_id,
     v.max_volume_ul,
     COALESCE(SUM(i.quantity * u.to_base) FILTER (WHERE u.dimension = 'volume'), 0) AS total_volume_ul,
     v.max_volume_ul
       - COALESCE(SUM(i.quantity * u.to_base) FILTER (WHERE u.dimension = 'volume'), 0) AS free_volume_ul
-FROM _staging.vessel v
-LEFT JOIN _staging.items i ON i.in_vessel = v.id
+FROM inventory.vessel v
+LEFT JOIN inventory.items i ON i.in_vessel = v.id
 LEFT JOIN units u          ON u.code = i.unit
 GROUP BY v.id;
 
 -- Enforce max_volume_ul as a hard limit whenever an item is added to, changed in, or moved into a vessel.
 -- Known gap (accepted): lowering a vessel's max_volume_ul below its current fill is not checked.
-CREATE FUNCTION _staging.check_vessel_capacity()
+CREATE FUNCTION inventory.check_vessel_capacity()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    fill _staging.vessel_fill%ROWTYPE;
+    fill inventory.vessel_fill%ROWTYPE;
 BEGIN
-    SELECT * INTO fill FROM _staging.vessel_fill WHERE vessel_id = NEW.in_vessel;
+    SELECT * INTO fill FROM inventory.vessel_fill WHERE vessel_id = NEW.in_vessel;
     IF fill.max_volume_ul IS NOT NULL AND fill.total_volume_ul > fill.max_volume_ul THEN
         RAISE EXCEPTION 'Vessel % over capacity: % uL of % uL',
             NEW.in_vessel, fill.total_volume_ul, fill.max_volume_ul;
@@ -66,8 +66,8 @@ END;
 $$;
 
 CREATE TRIGGER items_check_vessel_capacity
-AFTER INSERT OR UPDATE OF quantity, unit, in_vessel ON _staging.items
-FOR EACH ROW EXECUTE FUNCTION _staging.check_vessel_capacity();
+AFTER INSERT OR UPDATE OF quantity, unit, in_vessel ON inventory.items
+FOR EACH ROW EXECUTE FUNCTION inventory.check_vessel_capacity();
 
 -------------------------------------------------------------------------------
 -- Consumption: moving material from one item into another
@@ -81,9 +81,9 @@ FOR EACH ROW EXECUTE FUNCTION _staging.check_vessel_capacity();
 -- Returns the child item's id.
 --
 -- Usage:
---   SELECT _staging.transfer(1, 100, 'uL', p_to_vessel => 7);   -- aliquot 100 uL into vessel 7
---   SELECT _staging.transfer(4, 2, 'mL',  p_to_item   => 12);   -- add 2 mL of item 4 into mixture 12
-CREATE FUNCTION _staging.transfer(
+--   SELECT inventory.transfer(1, 100, 'uL', p_to_vessel => 7);   -- aliquot 100 uL into vessel 7
+--   SELECT inventory.transfer(4, 2, 'mL',  p_to_item   => 12);   -- add 2 mL of item 4 into mixture 12
+CREATE FUNCTION inventory.transfer(
     p_parent     INTEGER,
     p_amount     NUMERIC,
     p_unit       TEXT,
@@ -95,8 +95,8 @@ RETURNS INTEGER
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    parent       _staging.items%ROWTYPE;
-    child        _staging.items%ROWTYPE;
+    parent       inventory.items%ROWTYPE;
+    child        inventory.items%ROWTYPE;
     amount_unit  units%ROWTYPE;
     parent_unit  units%ROWTYPE;
     child_unit   units%ROWTYPE;
@@ -117,14 +117,14 @@ BEGIN
 
     -- 2. Lock the parent row: a second transfer from the same item waits here
     --    until this one commits, so two transfers can't both spend the same volume.
-    SELECT * INTO parent FROM _staging.items WHERE id = p_parent FOR UPDATE;
+    SELECT * INTO parent FROM inventory.items WHERE id = p_parent FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Item % does not exist', p_parent;
     END IF;
 
     -- Red material can't be used. Yellow is allowed: QC itself consumes material from
     -- a pending lot, and planning decides what to do with reserved / in-use items.
-    SELECT * INTO status FROM _staging.item_status WHERE item_id = p_parent;
+    SELECT * INTO status FROM inventory.item_status WHERE item_id = p_parent;
     IF status.light = 'red' THEN
         RAISE EXCEPTION 'Item % is red (%) and cannot be used',
             p_parent, array_to_string(status.red_reasons, ', ');
@@ -148,7 +148,7 @@ BEGIN
     END IF;
 
     -- 4. Take it out of the parent
-    UPDATE _staging.items
+    UPDATE inventory.items
     SET quantity = quantity - taken, updated_at = now()
     WHERE id = p_parent;
 
@@ -156,13 +156,13 @@ BEGIN
     IF p_to_vessel IS NOT NULL THEN
         -- New item: same material, inherits the parent's expiry. lot_id stays NULL
         -- because made items are traced to their lot through lineage.
-        INSERT INTO _staging.items
+        INSERT INTO inventory.items
             (description, material, manufacturer, in_vessel, quantity, unit, expires_at)
         VALUES
             (parent.description, parent.material, parent.manufacturer, p_to_vessel, p_amount, p_unit, parent.expires_at)
         RETURNING id INTO child_id;
     ELSE
-        SELECT * INTO child FROM _staging.items WHERE id = p_to_item FOR UPDATE;
+        SELECT * INTO child FROM inventory.items WHERE id = p_to_item FOR UPDATE;
         IF NOT FOUND THEN
             RAISE EXCEPTION 'Item % does not exist', p_to_item;
         END IF;
@@ -171,7 +171,7 @@ BEGIN
             RAISE EXCEPTION 'Item % is measured in % (%), cannot add an amount in % (%)',
                 p_to_item, child.unit, child_unit.dimension, p_unit, amount_unit.dimension;
         END IF;
-        UPDATE _staging.items
+        UPDATE inventory.items
         SET quantity = quantity + trim_scale(p_amount * amount_unit.to_base / child_unit.to_base), updated_at = now()
         WHERE id = p_to_item;
         child_id := p_to_item;
@@ -179,10 +179,11 @@ BEGIN
 
     -- 6. Record lineage. Adding from the same parent into the same mixture twice
     --    accumulates onto the existing edge instead of failing on the primary key.
-    INSERT INTO _staging.item_lineage (parent_item, child_item, quantity_used, unit, created_by)
-    VALUES (p_parent, child_id, taken, parent.unit, p_user)
+    INSERT INTO inventory.item_lineage (parent_item, child_item, quantity_used, unit, created_by)
+    VALUES (p_parent, child_id, taken, parent.unit,
+            COALESCE(p_user, NULLIF(current_setting('app.user_id', true), '')::INTEGER))  -- fall back to the API's request user
     ON CONFLICT (parent_item, child_item)
-    DO UPDATE SET quantity_used = _staging.item_lineage.quantity_used + EXCLUDED.quantity_used;
+    DO UPDATE SET quantity_used = inventory.item_lineage.quantity_used + EXCLUDED.quantity_used;
 
     RETURN child_id;
 END;
@@ -196,8 +197,8 @@ $$;
 -- once, at the shortest distance (MIN(depth)).
 
 -- Everything made from an item, at any depth.
--- Usage: SELECT * FROM _staging.item_descendants(1);
-CREATE FUNCTION _staging.item_descendants(p_item INTEGER)
+-- Usage: SELECT * FROM inventory.item_descendants(1);
+CREATE FUNCTION inventory.item_descendants(p_item INTEGER)
 RETURNS TABLE (item_id INTEGER, depth INTEGER)
 LANGUAGE sql
 STABLE
@@ -206,7 +207,7 @@ AS $$
         SELECT p_item AS item_id, 0 AS depth
         UNION ALL
         SELECT l.child_item, tree.depth + 1
-        FROM _staging.item_lineage l
+        FROM inventory.item_lineage l
         JOIN tree ON l.parent_item = tree.item_id
     ) CYCLE item_id SET is_cycle USING visited
     SELECT tree.item_id, MIN(tree.depth)
@@ -217,8 +218,8 @@ AS $$
 $$;
 
 -- Everything an item was made from, at any depth.
--- Usage: SELECT * FROM _staging.item_ancestors(42);
-CREATE FUNCTION _staging.item_ancestors(p_item INTEGER)
+-- Usage: SELECT * FROM inventory.item_ancestors(42);
+CREATE FUNCTION inventory.item_ancestors(p_item INTEGER)
 RETURNS TABLE (item_id INTEGER, depth INTEGER)
 LANGUAGE sql
 STABLE
@@ -227,7 +228,7 @@ AS $$
         SELECT p_item AS item_id, 0 AS depth
         UNION ALL
         SELECT l.parent_item, tree.depth + 1
-        FROM _staging.item_lineage l
+        FROM inventory.item_lineage l
         JOIN tree ON l.child_item = tree.item_id
     ) CYCLE item_id SET is_cycle USING visited
     SELECT tree.item_id, MIN(tree.depth)
@@ -239,19 +240,19 @@ $$;
 
 -- Every item that came from a supplier lot: the bought items themselves (depth 0)
 -- and everything made from them. This answers "this target batch is bad, what did it touch?"
--- Usage: SELECT * FROM _staging.lot_trace(3);
-CREATE FUNCTION _staging.lot_trace(p_lot INTEGER)
+-- Usage: SELECT * FROM inventory.lot_trace(3);
+CREATE FUNCTION inventory.lot_trace(p_lot INTEGER)
 RETURNS TABLE (item_id INTEGER, depth INTEGER)
 LANGUAGE sql
 STABLE
 AS $$
     WITH RECURSIVE tree AS (
         SELECT i.id AS item_id, 0 AS depth
-        FROM _staging.items i
+        FROM inventory.items i
         WHERE i.lot_id = p_lot
         UNION ALL
         SELECT l.child_item, tree.depth + 1
-        FROM _staging.item_lineage l
+        FROM inventory.item_lineage l
         JOIN tree ON l.parent_item = tree.item_id
     ) CYCLE item_id SET is_cycle USING visited
     SELECT tree.item_id, MIN(tree.depth)
@@ -278,7 +279,7 @@ $$;
 -- ADDING A STATE: add the boolean (as a column in 01-schema.sql, or calculated in `flags`
 -- below), then add ONE line to red_reasons or yellow_reasons. The colour follows automatically.
 
-CREATE VIEW _staging.item_status AS
+CREATE VIEW inventory.item_status AS
 WITH qc AS (
     -- QC flags come from every lot the item depends on: its own lot plus its ancestors' lots.
     -- So failing a lot turns everything made from it red, at any depth.
@@ -286,15 +287,15 @@ WITH qc AS (
         i.id AS item_id,
         COALESCE(bool_or(l.qc_failed), FALSE)                        AS qc_failed,
         COALESCE(bool_or(NOT l.qc_passed AND NOT l.qc_failed), FALSE) AS qc_pending
-    FROM _staging.items i
+    FROM inventory.items i
     LEFT JOIN LATERAL (
         SELECT i.lot_id
         UNION
         SELECT ai.lot_id
-        FROM _staging.item_ancestors(i.id) a
-        JOIN _staging.items ai ON ai.id = a.item_id
+        FROM inventory.item_ancestors(i.id) a
+        JOIN inventory.items ai ON ai.id = a.item_id
     ) src ON TRUE
-    LEFT JOIN _staging.lots l ON l.id = src.lot_id
+    LEFT JOIN inventory.lots l ON l.id = src.lot_id
     GROUP BY i.id
 ),
 flags AS (
@@ -312,9 +313,9 @@ flags AS (
         (i.quantity = 0)                                                              AS empty,
         qc.qc_failed,
         qc.qc_pending
-    FROM _staging.items i
-    JOIN _staging.vessel v        ON v.id = i.in_vessel
-    JOIN _staging.storage_unit su ON su.barcode = v.stored_in
+    FROM inventory.items i
+    JOIN inventory.vessel v        ON v.id = i.in_vessel
+    JOIN inventory.storage_unit su ON su.barcode = v.stored_in
     JOIN qc                       ON qc.item_id = i.id
 ),
 reasons AS (
@@ -347,15 +348,15 @@ FROM reasons r;
 
 -- Brief question 1: how much do we have, and how much of it is usable?
 -- Totals per material category and colour, in each dimension's base unit (uL / ug / pcs).
--- Usage: SELECT * FROM _staging.material_quantities WHERE material = 'Target proteins';
-CREATE VIEW _staging.material_quantities AS
+-- Usage: SELECT * FROM inventory.material_quantities WHERE material = 'Target proteins';
+CREATE VIEW inventory.material_quantities AS
 SELECT
     m.name                       AS material,
     u.dimension,
     s.light,
     COUNT(*)                     AS n_items,
     SUM(s.quantity * u.to_base)  AS total_base_unit
-FROM _staging.item_status s
+FROM inventory.item_status s
 JOIN materials m ON m.id = s.material
 JOIN units u     ON u.code = s.unit
 GROUP BY m.name, u.dimension, s.light;

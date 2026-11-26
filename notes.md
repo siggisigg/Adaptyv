@@ -1,10 +1,10 @@
 ## DONE: query for "what's inside a storage unit"
 
-Implemented as `_staging.storage_unit_contents(parent_barcode TEXT)`, using a SQL function with a `CYCLE` guard. The notes below are the reasoning behind it.
+Implemented as `inventory.storage_unit_contents(parent_barcode TEXT)`, using a SQL function with a `CYCLE` guard. The notes below are the reasoning behind it.
 
 `storage_unit.nested_units` was commented out. It duplicated `stored_in` (the parent pointer) and couldn't have foreign keys. The lookup it gave should come back as a stored query instead.
 
-- **Direct children** are just `SELECT * FROM _staging.storage_unit WHERE stored_in = <barcode>`.
+- **Direct children** are just `SELECT * FROM inventory.storage_unit WHERE stored_in = <barcode>`.
 - **Everything nested underneath at any depth** (box in rack in freezer) needs a `WITH RECURSIVE` query that walks *down* the `stored_in` links.
 - **Ways to "pre-compile" it in Postgres:**
   - **View.** A saved SELECT. Good for "full location path of every unit", but a view can't take a parameter such as a barcode.
@@ -22,7 +22,7 @@ Implemented as `_staging.storage_unit_contents(parent_barcode TEXT)`, using a SQ
 
 ## Traffic light (usable vs merely exists)
 
-Every state is an independent boolean, and the colour is **calculated** from them in `_staging.item_status`. The most severe active flag wins. The view also lists *why* in `red_reasons` and `yellow_reasons`.
+Every state is an independent boolean, and the colour is **calculated** from them in `inventory.item_status`. The most severe active flag wins. The view also lists *why* in `red_reasons` and `yellow_reasons`.
 
 | Flag | Colour | Kind | Lives on | Meaning |
 |---|---|---|---|---|

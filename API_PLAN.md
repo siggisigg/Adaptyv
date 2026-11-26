@@ -138,6 +138,6 @@ Grouped by the brief's questions. **Bold** endpoints are the core of the demo.
 
 ## Open questions
 
-- **Rename the `_staging` schema** to something like `inventory` before the API depends on the name? A leading underscore usually means "internal" or "temporary".
+- **Rename the `inventory` schema** to something like `inventory` before the API depends on the name? A leading underscore usually means "internal" or "temporary".
 - **IDs or barcodes in URLs?** Scientists scan barcodes, so barcodes are friendlier. That needs `vessel.barcode` first.
 - **Sync or async psycopg?** Sync is simpler and fine at lab traffic levels. Async only helps with many concurrent slow requests.

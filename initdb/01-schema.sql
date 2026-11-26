@@ -2,7 +2,7 @@
 -- Lookup data lives in 02-reference-data.sql; functions, views and triggers in 03-functions.sql.
 -- Postgres runs files in initdb/ in alphabetical order, so the numbering encodes dependencies.
 
-CREATE SCHEMA IF NOT EXISTS _staging;
+CREATE SCHEMA IF NOT EXISTS inventory;
 
 CREATE TABLE users
 (
@@ -39,7 +39,7 @@ CREATE TABLE storage_unit_kinds (
 );
 
 -- A supplier lot: what a delivery came from. Bad-batch tracing starts here.
-CREATE TABLE _staging.lots (
+CREATE TABLE inventory.lots (
     id                       SERIAL PRIMARY KEY,
     material                 INTEGER NOT NULL REFERENCES materials(id),
     supplier                 TEXT NOT NULL,
@@ -56,12 +56,12 @@ CREATE TABLE _staging.lots (
     CHECK (NOT (qc_passed AND qc_failed))    -- mutually exclusive outcomes
 );
 
-CREATE TABLE _staging.storage_unit (
+CREATE TABLE inventory.storage_unit (
     barcode          TEXT UNIQUE PRIMARY KEY,
     kind             TEXT NOT NULL REFERENCES storage_unit_kinds(code),
     description      TEXT,
     -- nested_units     INTEGER[],  -- storage_unit.barcode values; Postgres cannot enforce FKs on array elements
-    stored_in        TEXT REFERENCES _staging.storage_unit(barcode),
+    stored_in        TEXT REFERENCES inventory.storage_unit(barcode),
     n_rows           INTEGER CHECK (n_rows > 0),   -- grid layout for plates/boxes (8 x 12 for a 96-well plate)
     n_cols           INTEGER CHECK (n_cols > 0),
     from_stock       INTEGER,                -- FK added after the stock table exists (see below)
@@ -75,30 +75,31 @@ CREATE TABLE _staging.storage_unit (
 -- Countable consumables that sit on a shelf: boxes of tips, empty plates, chips.
 -- Using one decreases `quantity`; if it becomes a plate or tube, the new
 -- storage_unit / vessel row records where it came from in `from_stock`.
-CREATE TABLE _staging.stock (
+CREATE TABLE inventory.stock (
     id               SERIAL PRIMARY KEY,
     material         INTEGER NOT NULL REFERENCES materials(id),
-    lot_id           INTEGER REFERENCES _staging.lots(id),
+    lot_id           INTEGER REFERENCES inventory.lots(id),
     description      TEXT NOT NULL,          -- e.g. '96-well plate, Greiner 655101'
     quantity         INTEGER NOT NULL CHECK (quantity >= 0),
-    stored_in        TEXT NOT NULL REFERENCES _staging.storage_unit(barcode),
+    stored_in        TEXT NOT NULL REFERENCES inventory.storage_unit(barcode),
     updated_at       TIMESTAMPTZ,
     comment          TEXT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- storage_unit and stock reference each other, so one of the FKs has to be added afterwards.
-ALTER TABLE _staging.storage_unit
-    ADD FOREIGN KEY (from_stock) REFERENCES _staging.stock(id);
+ALTER TABLE inventory.storage_unit
+    ADD FOREIGN KEY (from_stock) REFERENCES inventory.stock(id);
 
 -- A single container of liquid: a tube, or one well of a plate.
-CREATE TABLE _staging.vessel (
+CREATE TABLE inventory.vessel (
     id               SERIAL PRIMARY KEY,
+    barcode          TEXT UNIQUE,            -- tubes carry one; wells don't (address them as plate barcode + position)
     name             TEXT NOT NULL,
-    stored_in        TEXT NOT NULL REFERENCES _staging.storage_unit(barcode),
+    stored_in        TEXT NOT NULL REFERENCES inventory.storage_unit(barcode),
     position         TEXT,                   -- slot in the parent's grid, e.g. 'A1'; NULL if not in a grid
     max_volume_ul    NUMERIC CHECK (max_volume_ul > 0),  -- hard capacity limit, in uL
-    from_stock       INTEGER REFERENCES _staging.stock(id),
+    from_stock       INTEGER REFERENCES inventory.stock(id),
     updated_at       TIMESTAMPTZ,
     comment          TEXT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -108,13 +109,13 @@ CREATE TABLE _staging.vessel (
 
 -- A physical amount of material in a vessel. Bought items point to their lot;
 -- made items (dilutions, aliquots, mixtures/concoctions) are traced through item_lineage.
-CREATE TABLE _staging.items (
+CREATE TABLE inventory.items (
     id               SERIAL PRIMARY KEY,
     description      TEXT,
     material         INTEGER NOT NULL REFERENCES materials(id),
     manufacturer     TEXT,
-    lot_id           INTEGER REFERENCES _staging.lots(id),  -- set for bought items, NULL for made ones
-    in_vessel        INTEGER NOT NULL REFERENCES _staging.vessel(id),
+    lot_id           INTEGER REFERENCES inventory.lots(id),  -- set for bought items, NULL for made ones
+    in_vessel        INTEGER NOT NULL REFERENCES inventory.vessel(id),
     quantity         NUMERIC NOT NULL CHECK (quantity >= 0),
     unit             TEXT NOT NULL REFERENCES units(code),
     updated_at       TIMESTAMPTZ,
@@ -136,10 +137,10 @@ CREATE TABLE _staging.items (
 --   aliquot split: 1 parent, many children
 --   mixture/buffer: many parents, 1 child
 -- quantity_used is how much of the parent went into the child, in the PARENT's unit.
--- Rows are written by _staging.transfer() (03-functions.sql), not by hand.
-CREATE TABLE _staging.item_lineage (
-    parent_item      INTEGER NOT NULL REFERENCES _staging.items(id),
-    child_item       INTEGER NOT NULL REFERENCES _staging.items(id),
+-- Rows are written by inventory.transfer() (03-functions.sql), not by hand.
+CREATE TABLE inventory.item_lineage (
+    parent_item      INTEGER NOT NULL REFERENCES inventory.items(id),
+    child_item       INTEGER NOT NULL REFERENCES inventory.items(id),
     quantity_used    NUMERIC NOT NULL CHECK (quantity_used > 0),
     unit             TEXT NOT NULL REFERENCES units(code),
     created_by       INTEGER REFERENCES users(id),
